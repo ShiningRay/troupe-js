@@ -3,6 +3,7 @@ import type { IdemMap } from "./envelope.js";
 import type { Agent } from "./agent.js";
 import type { ReminderSpec } from "../cues/cue-store.js";
 import { parseDuration } from "./duration.js";
+import { decoratedCueHandler } from "./cue-dispatch.js";
 
 /** 运行时注入到每个 Actor 实例的上下文（对调用方不可见，DESIGN §3.2） */
 export interface ActorContext {
@@ -152,9 +153,17 @@ export abstract class Actor<TProps = unknown> {
   /** 下场钩子：需要持久化时在此 saveProps()（可选） */
   async offStage(): Promise<void> {}
 
-  /** 持久提醒的稳定入口（§3.3）：调度器以内部 Call 分派，与业务调用同一串行 Turn；
-   * 至少一次投递——业务需按 (name, payload) 幂等（§7.5） */
-  async onCue(name: string, payload: unknown): Promise<void> {}
+  /**
+   * 持久提醒的稳定入口（§3.3）：调度器以内部 Call 分派，与业务调用同一串行 Turn；
+   * 至少一次投递——业务需按 (name, payload) 幂等（§7.5）。
+   * 默认实现分派到 @Cron/@Every 装饰的同名方法；覆写时可 super.onCue 兜底。
+   */
+  async onCue(name: string, payload: unknown): Promise<void> {
+    const decorated = decoratedCueHandler(this.constructor, name);
+    if (decorated !== null) {
+      await (this as unknown as Record<string, () => unknown>)[decorated]();
+    }
+  }
 
   /** 结构迁移钩子（§7.4）：从 fromVersion 逐级升到当前声明版本 */
   async migrateProps(stored: TProps, _fromVersion: number): Promise<TProps> {

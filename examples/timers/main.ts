@@ -12,7 +12,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Actor, Troupe } from "../../src/index.js";
+import { Actor, Cron, Every, Local, Troupe } from "../../src/index.js";
 import { SqlitePropStore } from "../../src/props/sqlite.js";
 import { SqliteCueStore } from "../../src/cues/sqlite.js";
 
@@ -168,6 +168,35 @@ class DeliveryActor extends Actor<{ delivered: boolean; requestId: string | null
   }
 }
 
+// ───── 模式 5：声明式装饰器（@Cron/@Every/@Local，推荐）─────
+
+let sweepRuns = 0;
+let hbRuns = 0;
+
+class DeclarativeActor extends Actor<{ swept: number }> {
+  static role = "Declarative";
+  static initialProps = () => ({ swept: 0 });
+
+  @Every(200) // 持久周期：激活即自动登记，跨下场/重启
+  async sweep() {
+    sweepRuns++;
+    this.props.swept++;
+    await this.saveProps();
+  }
+
+  @Cron("30 3 * * *") // cron：每天 03:30（本地时间）；演示只验证登记的 nextDue
+  async nightly() {}
+
+  @Local(80) // 内存 Cue：仅在场时有效
+  async heartbeat() {
+    hbRuns++;
+  }
+
+  async trigger() {
+    return "ok";
+  }
+}
+
 // ───── 反例：在 Turn 里 sleep 会占住串行通道 ─────
 
 class BlockingActor extends Actor<Record<string, never>> {
@@ -187,7 +216,7 @@ class BlockingActor extends Actor<Record<string, never>> {
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "troupe-timers-"));
   const troupe = await Troupe.form({
-    actors: [FlushCartActor, PatrolActor, OrderActor, DeliveryActor, BlockingActor],
+    actors: [FlushCartActor, PatrolActor, OrderActor, DeliveryActor, BlockingActor, DeclarativeActor],
     propStore: new SqlitePropStore(join(dir, "props")),
     cues: { store: new SqliteCueStore(join(dir, "cues")), tickMs: 100 },
     defaultIntermission: 400, // 短 intermission：便于观察"下场后持久提醒仍触发"
@@ -223,6 +252,16 @@ async function main(): Promise<void> {
   await delivery.submit("req-1"); // 调用方重试提交：幂等重放"已受理"，不触发新投递
   await sleep(1_600); // 重试提醒 → 第 2 次失败再登记 → 第 3 次成功
   console.log(`  [${ts()}] 最终 delivered = ${await delivery.status()}（外部尝试 ${externalAttempts} 次；受理幂等、重试由提醒驱动）`);
+
+  section("模式 5：声明式装饰器 @Cron/@Every/@Local（无需手写 onStage 注册）");
+  const decl = troupe.cast(DeclarativeActor, "decl-1");
+  await decl.trigger(); // 激活 → @Every/@Cron 自动登记（不存在才插入）、@Local 自动注册
+  await sleep(700);
+  const declCues = (await troupe.director().cues()) as Array<{ roleId: string; name: string; nextDue: string }>;
+  const nightly = declCues.find((c) => c.roleId === "Declarative" && c.name === "nightly");
+  console.log(`  [${ts()}] @Every(200ms) 已触发 ${sweepRuns} 次；@Local(80ms) 心跳 ${hbRuns} 次`);
+  console.log(`  [${ts()}] @Cron("30 3 * * *") 已登记，nextDue=${nightly ? new Date(nightly.nextDue).toLocaleString("zh-CN") : "?"}`);
+  console.log(`  [${ts()}] 装饰的方法仍可 RPC 手动触发（CLI：troupe call Declarative decl-1 sweep）`);
 
   section("反例：在 Turn 里 sleep 会占住串行通道（§5.1 执行占用）");
   const block = troupe.cast(BlockingActor, "block-1");

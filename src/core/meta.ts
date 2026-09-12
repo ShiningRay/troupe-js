@@ -1,6 +1,8 @@
 import { Actor } from "./actor.js";
 import { captureSource, registerActor } from "./repertoire.js";
 import { parseDuration } from "./duration.js";
+import { parseCronExpression } from "../cues/cron.js";
+import { registerDecoratedCues } from "./cue-dispatch.js";
 
 /** TS5 stage-3 类装饰器签名（内建 ClassDecorator 是 legacy 签名，不适用） */
 type Stage3ClassDecorator = (target: Function, context: ClassDecoratorContext) => Function | void;
@@ -17,12 +19,20 @@ export interface RoleMeta {
   initialProps: () => unknown;
   /** RPC 白名单：原型链上的公开方法（生命周期/基类成员/下划线开头者除外） */
   rpcMethods: ReadonlySet<string>;
+  /** 声明式持久提醒（@Cron/@Every）：方法名 → 计划 */
+  persistentCues: ReadonlyMap<string, { everyMs?: number; cron?: string }>;
+  /** 声明式内存 Cue（@Local）：方法名 → 周期 ms */
+  localCues: ReadonlyMap<string, number>;
   source: string;
 }
 
 /** @Improv / @ReadOnly 标注在方法函数上的标记（M1 按严格串行执行并告警，DESIGN §5.4） */
 const IMPROV_MARK = Symbol("troupe.improv");
 const READONLY_MARK = Symbol("troupe.readOnly");
+/** @Cron/@Every/@Local 定时任务标注（声明式 Cue，§3.3/§7.5） */
+const CRON_MARK = Symbol("troupe.cron");
+const EVERY_MARK = Symbol("troupe.every");
+const LOCAL_MARK = Symbol("troupe.local");
 
 interface DecoratorClassMeta {
   role?: string;
@@ -62,6 +72,39 @@ export function ReadOnly(target: Function, _context: ClassMethodDecoratorContext
   (target as any)[READONLY_MARK] = true;
 }
 
+/** 声明式 Cue 装饰器工厂的返回类型 */
+type CueDecoratorFactory = (target: Function, ctx: ClassMethodDecoratorContext<any, any>) => void;
+
+/**
+ * 声明式持久提醒（cron）：`@Cron("0 9 * * *")` —— 每天 09:00（服务器本地时间）。
+ * 方法即处理器：激活时自动登记（不存在才插入，不重置已排期）；触发经 onCue 进串行 Turn；
+ * 装饰的方法仍可经 RPC 手动触发（CLI/Booth 调试）。表达式在装饰期解析，非法即报错。
+ */
+export function Cron(expr: string): CueDecoratorFactory {
+  parseCronExpression(expr); // 装饰期 fail-fast
+  return (target: Function, _ctx: ClassMethodDecoratorContext<any, any>): void => {
+    (target as any)[CRON_MARK] = expr;
+  };
+}
+
+/** 声明式持久提醒（周期）：`@Every("30s")` —— 语义同 scheduleReminder({ every }) */
+export function Every(every: string | number): CueDecoratorFactory {
+  const ms = parseDuration(every);
+  if (!(ms > 0)) throw new TypeError(`@Every 时长必须为正：${String(every)}`);
+  return (target: Function, _ctx: ClassMethodDecoratorContext<any, any>): void => {
+    (target as any)[EVERY_MARK] = ms;
+  };
+}
+
+/** 声明式内存 Cue：`@Local("300ms")` —— 仅在场时有效，随下场清理（§3.3） */
+export function Local(every: string | number): CueDecoratorFactory {
+  const ms = parseDuration(every);
+  if (!(ms > 0)) throw new TypeError(`@Local 时长必须为正：${String(every)}`);
+  return (target: Function, _ctx: ClassMethodDecoratorContext<any, any>): void => {
+    (target as any)[LOCAL_MARK] = ms;
+  };
+}
+
 const RESERVED_MEMBERS = new Set([
   "constructor",
   "onStage",
@@ -77,10 +120,18 @@ function resolveRoleId(ctor: Function, decoratorRole?: string): string {
   return decoratorRole ?? statics.roleId ?? statics.role ?? ctor.name.replace(/Actor$/, "");
 }
 
-function collectRpcMethods(ctor: Function): { names: Set<string>; improv: Set<string>; readOnly: Set<string> } {
+function collectRpcMethods(ctor: Function): {
+  names: Set<string>;
+  improv: Set<string>;
+  readOnly: Set<string>;
+  persistentCues: Map<string, { everyMs?: number; cron?: string }>;
+  localCues: Map<string, number>;
+} {
   const names = new Set<string>();
   const improv = new Set<string>();
   const readOnly = new Set<string>();
+  const persistentCues = new Map<string, { everyMs?: number; cron?: string }>();
+  const localCues = new Map<string, number>();
   let proto: object | null = (ctor as { prototype: object }).prototype;
   const baseProto = (Actor as { prototype: object }).prototype;
   while (proto && proto !== baseProto) {
@@ -91,10 +142,13 @@ function collectRpcMethods(ctor: Function): { names: Set<string>; improv: Set<st
       names.add(name);
       if ((desc.value as any)[IMPROV_MARK]) improv.add(name);
       if ((desc.value as any)[READONLY_MARK]) readOnly.add(name);
+      if ((desc.value as any)[CRON_MARK] !== undefined) persistentCues.set(name, { cron: (desc.value as any)[CRON_MARK] });
+      if ((desc.value as any)[EVERY_MARK] !== undefined) persistentCues.set(name, { everyMs: (desc.value as any)[EVERY_MARK] });
+      if ((desc.value as any)[LOCAL_MARK] !== undefined) localCues.set(name, (desc.value as any)[LOCAL_MARK]);
     }
     proto = Object.getPrototypeOf(proto);
   }
-  return { names, improv, readOnly };
+  return { names, improv, readOnly, persistentCues, localCues };
 }
 
 export interface DescribeRoleResult {
@@ -123,7 +177,7 @@ export function describeRole(
 
   const roleId = resolveRoleId(ctor, deco.role);
   const intermissionMs = parseDuration(deco.intermission ?? statics.intermission ?? defaults.intermissionMs);
-  const { names, improv, readOnly } = collectRpcMethods(ctor);
+  const { names, improv, readOnly, persistentCues, localCues } = collectRpcMethods(ctor);
   for (const n of statics.improv ?? []) improv.add(n);
   for (const n of statics.readOnly ?? []) readOnly.add(n);
 
@@ -139,6 +193,8 @@ export function describeRole(
     );
   }
 
+  registerDecoratedCues(ctor, persistentCues.keys());
+
   return {
     meta: {
       ctor,
@@ -150,6 +206,8 @@ export function describeRole(
       schemaVersion: statics.schemaVersion ?? 1,
       initialProps: statics.initialProps?.bind(ctor) ?? (() => ({})),
       rpcMethods: names,
+      persistentCues,
+      localCues,
       source,
     },
     warnings,

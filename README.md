@@ -125,13 +125,28 @@ M4 验收（12 例新增）：CueStore CAS/租约；周期触发进串行 Turn +
 
 | 场景 | 用法 | 语义 |
 |---|---|---|
-| 在场才有效的周期任务（攒批 flush、心跳） | `onStage()` 里 `this.registerCue("flush", "300ms", fn)` | 随下场自动清理、重新登台重注册；回调经串行 Turn（不与业务交错）；上一拍未完成跳过本拍 |
+| **声明式定时（推荐）** | `@Cron("0 9 * * *")` / `@Every("30s")` / `@Local("300ms")` 装饰方法 | 激活即自动登记（不存在才插入，不重置已排期）；触发经串行 Turn；装饰方法仍可 RPC 手动触发；cron 在装饰期解析（非法即报错）；@Local 无需 cues 选项 |
+| 在场才有效的周期任务（命令式） | `onStage()` 里 `this.registerCue("flush", "300ms", fn)` | 随下场自动清理、重新登台重注册；回调经串行 Turn；上一拍未完成跳过本拍 |
 | 跨下场/跨重启的业务巡检 | `this.scheduleReminder(name, { every, payload })` + `onCue` | 写入 CueStore，触发即重新登台；至少一次投递（业务按 name+payload 幂等）；错过周期合并补发一次 |
 | 延时任务（订单超时取消） | `scheduleReminder(name, { at, payload })`；完成后 `cancelReminder` | 一次性；支付成功即注销（注销竞争由 statusVersion CAS 裁决）；跨重启生效 |
 | 失败后延迟重试 | 幂等**受理**（`idempotent`）+ at 提醒驱动内部重试状态机 | 幂等键去重重复提交；重试由提醒触发（注意：不要把"暂不可用"当 idempotent 的最终结果记录，会被重放短路） |
 | ⚠ 反例 | 业务方法里 `await sleep(...)` 等待延时 | 占用该 Actor 的串行通道（§5.1），阻塞后续调用——延时逻辑一律用 `at` 提醒登记 |
 
-完整演示：`npm run example:timers`（五段含反例）。
+```typescript
+class ReportActor extends Actor<Props> {
+  @Cron("0 9 * * *")           // 每天 09:00（本地时间）：持久，跨重启
+  async dailyReport() { ... }
+
+  @Every("30s")                // 持久周期：激活自动登记
+  async sweep() { ... }
+
+  @Local("300ms")              // 内存 Cue：仅在场时有效
+  async heartbeat() { ... }
+}
+// 需要 form({ cues: true })（@Cron/@Every）；@Local 无需
+```
+
+cron 语义：5 字段（分 时 日 月 周，本地时间），支持 `*`、步进、区间、列表；日/周同受限取"或"。完整演示：`npm run example:timers`（六段含反例）。
 
 ## 基准参考数字（Apple Silicon，loopback，256B 往返）
 
@@ -153,7 +168,7 @@ M4 验收（12 例新增）：CueStore CAS/租约；周期触发进串行 Turn +
 - **无所有权的外部副作用保护**：租约挡不住已恢复旧代码的外部副作用（HTTP/消息），需接收方校验 epoch 或 outbox（DESIGN §6.5，指引见 COMPATIBILITY.md）
 - **成员分区混沌**：丢包/乱序注入以 Roster 单元测试的对抗性序列覆盖；netem 级网络混沌待专项环境（PLAN M3 验收备注）
 - **无传输加密/鉴权**：绑定 loopback（dev）/production 前提为受控网络；传输保护与 join 凭证属后续
-- **Cue 计划形态**：M4 支持 every（周期）/at（一次性）；cron 表达式与 timezone 解析、PG 版 CueStore 列为后续
+- **Cue 计划形态**：every/at/cron（本地时间）已支持；显式 timezone 解析、PG 版 CueStore 列为后续
 - **Director 跨 Stage 扇出聚合**：CLI/Booth 连单点；集群级聚合视图后续
 - **@Improv/@ReadOnly 无交错**：M5
 - **Codec 为默认 JSON 语义**：MessagePack 插件后续

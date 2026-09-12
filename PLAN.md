@@ -232,7 +232,7 @@ troupejs/
 
 ## 8. 下一步（M5 启动清单）
 
-M1–M4 已完成（M4：2026-09-13）。M4 代码骨架：`src/cues/{cue-store,memory,sqlite,scheduler,actor-cues}.ts`、`src/director/director.ts`、wire `t=dir` 通道（token 校验）、`cli/troupe.ts`、Booth `/healthz`+`/metrics`。已知边界：cron 表达式与 timezone 解析未实现（every/at 已覆盖）；PG 版 CueStore 未实现（SQLite 同机多进程可用）；跨 Stage 的 Director 扇出聚合未做（CLI 连单点）。
+M1–M4 已完成（M4：2026-09-13）。M4 代码骨架：`src/cues/{cue-store,memory,sqlite,scheduler,actor-cues}.ts`、`src/director/director.ts`、wire `t=dir` 通道（token 校验）、`cli/troupe.ts`、Booth `/healthz`+`/metrics`。已知边界：cron（5 字段，本地时间）已随装饰器交付；显式 timezone 解析、PG 版 CueStore 未实现（SQLite 同机多进程可用）；PG 版 CueStore 未实现（SQLite 同机多进程可用）；跨 Stage 的 Director 扇出聚合未做（CLI 连单点）。
 
 1. 允许组合矩阵：`@ReadOnly`×`@ReadOnly`、`@Improv`×任意 await 点、未标注不交错（DESIGN §5.4）
 2. 写饥饿防护：写调用入队后读让位/读份额上限

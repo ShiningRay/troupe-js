@@ -6,7 +6,7 @@ export {
   type ActorStaticOptions,
   type ActorContext,
 } from "./core/actor.js";
-export { Performs, Intermission, Improv, ReadOnly, type RoleMeta } from "./core/meta.js";
+export { Performs, Intermission, Improv, ReadOnly, Cron, Every, Local, type RoleMeta } from "./core/meta.js";
 export { type Agent, type AgentRpcMethodNames } from "./core/agent.js";
 export { type PropStore, type StoredProps, type WriteOptions } from "./props/prop-store.js";
 export { InMemoryPropStore } from "./props/memory.js";

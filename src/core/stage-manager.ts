@@ -391,6 +391,27 @@ export class StageManager {
       slot.instance = instance;
 
       await instance.onStage();
+      // 声明式 Cue（@Cron/@Every/@Local）：激活即登记
+      if (meta.persistentCues.size > 0) {
+        if (!this.cueApi) {
+          throw new TroupeError(
+            `${roleId} 使用 @Cron/@Every 声明式提醒，需要 Troupe.form({ cues: true }) 启用（§7.5）`,
+          );
+        }
+        for (const [cueName, plan] of meta.persistentCues) {
+          await this.cueApi.ensure(
+            { roleId, stageName },
+            cueName,
+            plan.cron !== undefined ? { cron: plan.cron } : { every: plan.everyMs },
+          );
+        }
+      }
+      for (const [cueName, everyMs] of meta.localCues) {
+        this.registerMemoryCue(slot, cueName, everyMs, async () => {
+          const fn = (instance as unknown as Record<string, () => unknown>)[cueName];
+          await fn.call(instance);
+        });
+      }
       slot.state = "running";
       this.events.emit({ type: "activated", roleId, stageName, at: this.now() });
       this.scheduleIdle(slot);

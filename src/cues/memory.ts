@@ -20,6 +20,18 @@ export class InMemoryCueStore implements CueStore {
     });
   }
 
+  async ensure(rec: Omit<ReminderRecord, "statusVersion" | "leaseUntil" | "owner">): Promise<void> {
+    const key = this.k(rec);
+    if (this.data.has(key)) return; // 声明式登记：不重置已存在的 nextDue
+    this.data.set(key, {
+      ...rec,
+      payload: cloneReminderPayload(rec.payload),
+      statusVersion: 1,
+      leaseUntil: 0,
+      owner: null,
+    });
+  }
+
   async delete(key: ReminderKey): Promise<boolean> {
     return this.data.delete(this.k(key));
   }

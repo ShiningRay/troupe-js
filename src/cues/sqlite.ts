@@ -18,6 +18,7 @@ interface CueRow {
   payload_json: string;
   every_ms: number | null;
   at_ms: number | null;
+  cron: string | null;
   next_due: number;
   status_version: number;
   lease_until: number;
@@ -29,6 +30,7 @@ export class SqliteCueStore implements CueStore {
   private db: DatabaseSyncType | null = null;
   private stmts: {
     upsert: ReturnType<DatabaseSyncType["prepare"]>;
+    ensure: ReturnType<DatabaseSyncType["prepare"]>;
     del: ReturnType<DatabaseSyncType["prepare"]>;
     due: ReturnType<DatabaseSyncType["prepare"]>;
     get: ReturnType<DatabaseSyncType["prepare"]>;
@@ -43,7 +45,7 @@ export class SqliteCueStore implements CueStore {
     private readonly file: string = "cues.db",
   ) {}
 
-  private ensure(): void {
+  private openDb(): void {
     if (this.db) return;
     mkdirSync(this.dir, { recursive: true });
     this.db = new DatabaseSync(join(this.dir, this.file));
@@ -66,18 +68,29 @@ export class SqliteCueStore implements CueStore {
       );
       CREATE INDEX IF NOT EXISTS cues_next_due ON cues (next_due);
     `);
+    // 迁移：早期版本无 cron 列（ALTER 幂等）
+    const cols = this.db.prepare("PRAGMA table_info(cues)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "cron")) {
+      this.db.exec("ALTER TABLE cues ADD COLUMN cron TEXT");
+    }
     this.stmts = {
       upsert: this.db.prepare(`
-        INSERT INTO cues (namespace, role_id, stage_name, name, payload_json, every_ms, at_ms, next_due, status_version, lease_until, owner)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, NULL)
+        INSERT INTO cues (namespace, role_id, stage_name, name, payload_json, every_ms, at_ms, cron, next_due, status_version, lease_until, owner)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, NULL)
         ON CONFLICT (namespace, role_id, stage_name, name) DO UPDATE SET
           payload_json = excluded.payload_json,
           every_ms = excluded.every_ms,
           at_ms = excluded.at_ms,
+          cron = excluded.cron,
           next_due = excluded.next_due,
           status_version = cues.status_version + 1,
           lease_until = 0,
           owner = NULL
+      `),
+      ensure: this.db.prepare(`
+        INSERT INTO cues (namespace, role_id, stage_name, name, payload_json, every_ms, at_ms, cron, next_due, status_version, lease_until, owner)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, NULL)
+        ON CONFLICT (namespace, role_id, stage_name, name) DO NOTHING
       `),
       del: this.db.prepare(
         "DELETE FROM cues WHERE namespace = ? AND role_id = ? AND stage_name = ? AND name = ?",
@@ -112,6 +125,7 @@ export class SqliteCueStore implements CueStore {
       payload: JSON.parse(row.payload_json),
       everyMs: row.every_ms === null ? null : Number(row.every_ms),
       at: row.at_ms === null ? null : Number(row.at_ms),
+      cron: row.cron ?? null,
       nextDue: Number(row.next_due),
       statusVersion: Number(row.status_version),
       leaseUntil: Number(row.lease_until),
@@ -120,27 +134,36 @@ export class SqliteCueStore implements CueStore {
   }
 
   async upsert(rec: Omit<ReminderRecord, "statusVersion" | "leaseUntil" | "owner">): Promise<void> {
-    this.ensure();
+    this.openDb();
     this.stmts!.upsert.run(
       rec.namespace, rec.roleId, rec.stageName, rec.name,
       JSON.stringify(cloneReminderPayload(rec.payload)),
-      rec.everyMs, rec.at, rec.nextDue,
+      rec.everyMs, rec.at, rec.cron, rec.nextDue,
+    );
+  }
+
+  async ensure(rec: Omit<ReminderRecord, "statusVersion" | "leaseUntil" | "owner">): Promise<void> {
+    this.openDb();
+    this.stmts!.ensure.run(
+      rec.namespace, rec.roleId, rec.stageName, rec.name,
+      JSON.stringify(cloneReminderPayload(rec.payload)),
+      rec.everyMs, rec.at, rec.cron, rec.nextDue,
     );
   }
 
   async delete(key: ReminderKey): Promise<boolean> {
-    this.ensure();
+    this.openDb();
     return this.stmts!.del.run(key.namespace, key.roleId, key.stageName, key.name).changes === 1;
   }
 
   async due(now: number, limit: number): Promise<ReminderRecord[]> {
-    this.ensure();
+    this.openDb();
     const rows = this.stmts!.due.all(now, now, limit) as unknown as CueRow[];
     return rows.map((r) => this.toRecord(r));
   }
 
   async claim(key: ReminderKey, owner: string, leaseUntil: number, now: number): Promise<ReminderRecord | null> {
-    this.ensure();
+    this.openDb();
     const c = this.stmts!.claim.run(
       owner, leaseUntil,
       key.namespace, key.roleId, key.stageName, key.name, now,
@@ -150,7 +173,7 @@ export class SqliteCueStore implements CueStore {
   }
 
   async complete(key: ReminderKey, expectedStatusVersion: number, nextDue: number | null): Promise<boolean> {
-    this.ensure();
+    this.openDb();
     if (nextDue === null) {
       return this.stmts!.completeDel.run(
         key.namespace, key.roleId, key.stageName, key.name, expectedStatusVersion,
@@ -163,7 +186,7 @@ export class SqliteCueStore implements CueStore {
   }
 
   async list(namespace: string): Promise<ReminderRecord[]> {
-    this.ensure();
+    this.openDb();
     const rows = this.stmts!.list.all(namespace) as unknown as CueRow[];
     return rows.map((r) => this.toRecord(r));
   }

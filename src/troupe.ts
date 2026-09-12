@@ -20,6 +20,7 @@ import { createAgent, type Agent } from "./core/agent.js";
 import { Cluster, type ClusterOptions } from "./cluster/cluster.js";
 import { Booth, type BoothOptions } from "./booth/server.js";
 import type { CueStore, ReminderSpec } from "./cues/cue-store.js";
+import { nextCronTime, parseCronExpression } from "./cues/cron.js";
 import { InMemoryCueStore } from "./cues/memory.js";
 import { SqliteCueStore } from "./cues/sqlite.js";
 import { CueScheduler } from "./cues/scheduler.js";
@@ -180,6 +181,14 @@ export class Troupe {
 
     // 持久提醒（§7.5）：schedule/cancel 只依赖存储，可先于 StageManager 构造
     let cueStore: CueStore | null = null;
+    if (!opts.cues) {
+      const offender = [...roles.values()].find((m) => m.persistentCues.size > 0);
+      if (offender) {
+        throw new TroupeError(
+          `角色 "${offender.roleId}" 使用 @Cron/@Every 声明式提醒，需要 Troupe.form({ cues: true }) 启用（§7.5）`,
+        );
+      }
+    }
     if (opts.cues) {
       const c = opts.cues === true ? {} : opts.cues;
       cueStore =
@@ -188,27 +197,49 @@ export class Troupe {
           ? new InMemoryCueStore()
           : new SqliteCueStore(process.env.TROUPE_CUES_DIR ?? "./.troupe"));
     }
+    const buildRecord = (
+      identity: { roleId: string; stageName: string },
+      name: string,
+      spec: ReminderSpec,
+    ) => {
+      const everyMs = spec.every !== undefined ? parseDuration(spec.every) : null;
+      const at = spec.at !== undefined ? new Date(spec.at).getTime() : null;
+      const cron = spec.cron ?? null;
+      if (everyMs === null && at === null && cron === null) {
+        throw new TroupeError(`提醒 "${name}" 需要 every（周期）、at（一次性时间）或 cron 之一（§7.5）`);
+      }
+      if (everyMs !== null && !(everyMs > 0)) {
+        throw new TroupeError(`提醒 "${name}" 的 every 必须为正时长`);
+      }
+      let nextDue: number;
+      if (cron !== null) {
+        const t = nextCronTime(parseCronExpression(cron), now());
+        if (t === null) throw new TroupeError(`提醒 "${name}" 的 cron 一年内无触发时间：${cron}`);
+        nextDue = t;
+      } else if (everyMs !== null) {
+        nextDue = now() + everyMs;
+      } else {
+        nextDue = at!;
+      }
+      return {
+        namespace: config.namespace,
+        roleId: identity.roleId,
+        stageName: identity.stageName,
+        name,
+        payload: spec.payload ?? null,
+        everyMs,
+        at,
+        cron,
+        nextDue,
+      };
+    };
     const cueApi: ActorCueApi | undefined = cueStore
       ? {
           schedule: async (identity, name, spec) => {
-            const everyMs = spec.every !== undefined ? parseDuration(spec.every) : null;
-            const at = spec.at !== undefined ? new Date(spec.at).getTime() : null;
-            if (everyMs === null && at === null) {
-              throw new TroupeError(`提醒 "${name}" 需要 every（周期）或 at（一次性时间）之一（§7.5）`);
-            }
-            if (everyMs !== null && !(everyMs > 0)) {
-              throw new TroupeError(`提醒 "${name}" 的 every 必须为正时长`);
-            }
-            await cueStore!.upsert({
-              namespace: config.namespace,
-              roleId: identity.roleId,
-              stageName: identity.stageName,
-              name,
-              payload: spec.payload ?? null,
-              everyMs,
-              at,
-              nextDue: everyMs !== null ? now() + everyMs : at!,
-            });
+            await cueStore!.upsert(buildRecord(identity, name, spec));
+          },
+          ensure: async (identity, name, spec) => {
+            await cueStore!.ensure(buildRecord(identity, name, spec));
           },
           cancel: (identity, name) =>
             cueStore!.delete({ namespace: config.namespace, roleId: identity.roleId, stageName: identity.stageName, name }),
