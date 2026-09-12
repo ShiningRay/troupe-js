@@ -136,6 +136,7 @@ await cart.add(item);                         // 方法签名编译期检查
 - **注册双轨**：`form({ actors })` 显式注册优先；`@Performs` 装饰器在类定义时写入进程级默认注册表，`form()` 不传 `actors` 时取该注册表**快照**——装饰器是便利语法，不是唯一入口；同进程多个 Troupe（测试场景）互不污染
 - 集群 join 校验各 Stage 的**角色集合与协议版本**：Call 被路由到未加载该角色的 Stage 时显式报错，不静默
 - Agent 是 `Proxy`，**类型面只暴露 RPC 方法**：Props、生命周期钩子（`onStage`/`offStage`）、运行时成员（`saveProps` 等）对调用方不可见；所有方法统一返回 Promise；Proxy 对 `then`/`Symbol`/调试访问安全（不被误当 Promise、不误发 RPC）。编译期类型过滤不是安全边界——接收端方法白名单见 §6.1
+- **Actor 互调**（§10.1）：Actor 内部同样可获取其它角色的 Agent——`this.cast(OtherActor, stageName)`（protected，经当前 Troupe 的 Repertoire 校验）；M1 为进程内直连，M2 起经 Playbill 路由
 - **身份与命名空间**：存储键为 `(namespace, roleId, stageName)`。roleId 默认由类名派生（原型便利），但类重命名/构建产物改名会让旧状态无法寻址——持久业务应声明稳定 `static roleId = "cart"`；namespace 默认取应用名，避免多环境共用后端时串数据
 
 ### 3.3 Cue（定时器）与持久提醒
@@ -682,7 +683,8 @@ interface IDirector extends IRole {
 
 ### 11.3 Booth（Web 管理界面）
 
-- SPA 预构建打进 npm 包，用户零构建；`troupe booth` 一键起；dev 模式自动挂在 Stage 端口 `/booth` 并在启动日志打印地址
+- **预览版已随 M2 交付**：`form({ booth: true })` 启用，独立 loopback 端口（默认 7500），单文件页面零构建——展示本 Stage 的成员、在场 Actor 状态机、每角色指标（调用/错误/拒绝/p50/p99/max）、事件流（最近 200 条），并提供白名单校验的调用面板与强制下场
+- 完整版（本节下述形态）：SPA 预构建打进 npm 包，用户零构建；`troupe booth` 一键起；dev 模式自动挂在 Stage 端口 `/booth` 并在启动日志打印地址；跨 Stage 聚合经 Director（M4）
 - 页面：Troupe 总览 / Ring 视图 / Actors 浏览器 / Actor 详情（Props 实时视图 + 方法调用面板：挂 Zod schema 自动生成表单，否则 JSON 编辑器 + 强制下场）/ Live Trace 动画 / Cues / Metrics 图表
 - 实时推送用 SSE；方法调用走 POST；前端构建期技术栈自由（产物静态文件，依赖不进用户 node_modules）
 

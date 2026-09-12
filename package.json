@@ -1,0 +1,47 @@
+{
+  "name": "troupe",
+  "version": "0.1.0",
+  "description": "Troupe.js — Virtual Actor framework for Node.js/TypeScript (M1: strict-serial single-stage runtime)",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "example": "tsx examples/minimal/main.ts",
+    "demo": "tsx examples/demo/main.ts",
+    "demo:m2": "tsx examples/demo-m2/main.ts",
+    "example:cluster": "tsx examples/cluster/main.ts",
+    "example:chat": "tsx examples/chat/server.ts",
+    "bench:sqlite": "tsx examples/bench/sqlite-bench.ts",
+    "bench:cluster": "tsx examples/bench/cluster-bench.ts",
+    "cli": "tsx cli/troupe.ts",
+    "example:timers": "tsx examples/timers/main.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}

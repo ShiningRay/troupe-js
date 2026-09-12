@@ -1,0 +1,109 @@
+/** 观测埋点与测试注入接口（PLAN M1：完整界面后移） */
+
+export type TroupeEventType =
+  | "warn"
+  | "activationStarted"
+  | "activated"
+  | "activationFailed"
+  | "callRejected"
+  | "turnStarted"
+  | "turnEnded"
+  | "drainStarted"
+  | "offStage"
+  | "offStageFailed"
+  | "invalidated"
+  | "saveSucceeded"
+  | "saveFailed"
+  | "clusterStarted"
+  | "membershipChanged"
+  | "cueFired"
+  | "cueFailed";
+
+export interface TroupeEvent {
+  type: TroupeEventType;
+  roleId: string;
+  stageName?: string;
+  method?: string;
+  at: number;
+  detail?: Record<string, unknown>;
+}
+
+export class EventBus {
+  private listeners = new Set<(e: TroupeEvent) => void>();
+
+  /** 订阅埋点事件；返回退订函数。监听器抛错不影响运行时。 */
+  on(listener: (e: TroupeEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  emit(e: TroupeEvent): void {
+    for (const l of [...this.listeners]) {
+      try {
+        l(e);
+      } catch {
+        // 埋点失败不影响运行时
+      }
+    }
+  }
+}
+
+export interface RoleMetricsSnapshot {
+  calls: number;
+  errors: number;
+  rejections: number;
+  latency: { p50: number; p99: number; max: number; samples: number };
+}
+
+const RING_SIZE = 256;
+
+export class Metrics {
+  private byRole = new Map<
+    string,
+    { calls: number; errors: number; rejections: number; ring: number[] }
+  >();
+
+  constructor(private readonly now: () => number) {}
+
+  private role(roleId: string) {
+    let r = this.byRole.get(roleId);
+    if (!r) {
+      r = { calls: 0, errors: 0, rejections: 0, ring: [] };
+      this.byRole.set(roleId, r);
+    }
+    return r;
+  }
+
+  /** 记录一次完成的 Turn（ok=false 表示业务执行抛错；调用方超时不计入 errors） */
+  call(roleId: string, latencyMs: number, ok: boolean): void {
+    const r = this.role(roleId);
+    r.calls++;
+    if (!ok) r.errors++;
+    if (r.ring.length >= RING_SIZE) r.ring.shift();
+    r.ring.push(latencyMs);
+  }
+
+  rejection(roleId: string): void {
+    this.role(roleId).rejections++;
+  }
+
+  snapshot(): Record<string, RoleMetricsSnapshot> {
+    const out: Record<string, RoleMetricsSnapshot> = {};
+    for (const [roleId, r] of this.byRole) {
+      const sorted = [...r.ring].sort((a, b) => a - b);
+      const pick = (q: number) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] : 0);
+      out[roleId] = {
+        calls: r.calls,
+        errors: r.errors,
+        rejections: r.rejections,
+        latency: {
+          p50: pick(0.5),
+          p99: pick(0.99),
+          max: sorted.length ? sorted[sorted.length - 1] : 0,
+          samples: sorted.length,
+        },
+      };
+    }
+    return out;
+  }
+}
