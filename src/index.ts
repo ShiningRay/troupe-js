@@ -21,6 +21,12 @@ export { HashRing, xxh32 } from "./cluster/hash-ring.js";
 export { type ClusterOptions } from "./cluster/cluster.js";
 export { Booth, type BoothOptions } from "./booth/server.js";
 export { directorCall, DIRECTOR_METHODS, type DirectorDeps, type DirectorMethod } from "./director/director.js";
+export { type Audience, ShowBroker } from "./show/show.js";
+export { TraceBus, type TraceEvent, type TraceFilter, type TraceOptions } from "./core/trace.js";
+export { traceIdOf, currentSpan, type SpanContext } from "./core/trace-context.js";
+export { BoxOffice, type BoxOfficeOptions } from "./boxoffice/boxoffice.js";
+export { scanActorSource, createDevReloader, reloadActorClass, type DevReloaderOptions, type ReloadPolicy, type ReloadResult } from "./hot/reload.js";
+export { SwapViolationError } from "./core/errors.js";
 export { Transport, WIRE_PROTOCOL_VERSION, type WireMessage, type WireCall, type WireResponse } from "./cluster/transport.js";
 export {
   EventBus,

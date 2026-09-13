@@ -41,6 +41,7 @@ export const BOOTH_HTML = `<!doctype html>
   textarea { grid-column: 1 / 4; min-height: 54px; }
   #result { grid-column: 1 / -1; white-space: pre-wrap; word-break: break-all; color: #9aa4b2; margin: 4px 0 0; min-height: 1.2em; }
   .ok { color: #3fb950 !important; } .err { color: #f85149 !important; }
+  .row { display: flex; gap: 14px; align-items: center; }
 </style>
 </head>
 <body>
@@ -79,6 +80,30 @@ export const BOOTH_HTML = `<!doctype html>
       <button type="button" id="c-off" class="warn">强制下场</button>
       <pre id="result"></pre>
     </form>
+  </section>
+  <section class="full">
+    <h2>Ring 视图（HashRing 成员 · §6.3）</h2>
+    <div class="row"><svg id="ring" width="360" height="180" viewBox="0 0 360 180"></svg><div id="ring-legend" class="muted"></div></div>
+  </section>
+  <section class="full">
+    <h2>Live Trace（M6 总线 · 最新 120 条）</h2>
+    <table>
+      <thead><tr><th>时间</th><th>链路</th><th>调用</th><th class="num">耗时</th><th>结果</th><th>trace</th></tr></thead>
+      <tbody id="traces"></tbody>
+    </table>
+    <div class="muted" id="traces-empty">（暂无调用）</div>
+  </section>
+  <section class="full">
+    <h2>持久提醒（CueStore · §7.5）</h2>
+    <table>
+      <thead><tr><th>Stage</th><th>角色</th><th>stageName</th><th>名称</th><th>周期</th><th>下次触发</th></tr></thead>
+      <tbody id="cues"></tbody>
+    </table>
+    <div class="muted" id="cues-empty">（无持久提醒）</div>
+  </section>
+  <section class="full" id="detail-card" style="display:none">
+    <h2>Actor 详情（inspect · 只读快照）</h2>
+    <pre id="detail" class="muted" style="white-space:pre-wrap"></pre>
   </section>
   <section class="full">
     <h2>事件流（最近 200 条）</h2>
@@ -147,6 +172,71 @@ function render(d) {
     b.textContent = e.type + "  " + (e.roleId || "") + (e.stageName ? "/" + e.stageName : "") + (e.method ? "." + e.method : "");
     li.append(t, b); ul.appendChild(li);
   }
+
+  // Ring
+  renderRing(d);
+
+  // Live Trace
+  const tb = $("traces"); tb.innerHTML = "";
+  $("traces-empty").style.display = (d.traces || []).length ? "none" : "block";
+  for (const t of (d.traces || []).slice(0, 40)) {
+    const tr = document.createElement("tr");
+    const cells = [
+      new Date(t.at).toLocaleTimeString(),
+      (t.caller || "local") + " → " + t.roleId + "/" + t.stageName,
+      t.method,
+      Math.round(t.durationMs) + "ms",
+      t.outcome === "timeout" ? "⏱ 结果未知" : (t.ok ? "✓" : "✗ " + (t.outcome || "")),
+      (t.traceparent || "").split("-")[1] ? (t.traceparent||"").slice(3, 11) + "…" : "",
+    ];
+    cells.forEach((c, i) => {
+      const td = document.createElement("td");
+      if (i === 3) td.className = "num";
+      if (i === 4 && t.outcome !== "timeout") td.style.color = t.ok ? "#3fb950" : "#f85149";
+      td.textContent = c;
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  }
+
+  // Cues（聚合）
+  const cb = $("cues"); cb.innerHTML = "";
+  const cues = d.cues || (d.cluster && d.cluster.cues) || [];
+  $("cues-empty").style.display = cues.length ? "none" : "block";
+  for (const c of cues) {
+    const tr = document.createElement("tr");
+    [c.stage || "", c.roleId, c.stageName, c.name, c.everyMs ? c.everyMs + "ms" : "一次性", c.nextDue]
+      .forEach((v, i) => { const td = document.createElement("td"); if (i === 4) td.className = "num"; td.textContent = v; tr.appendChild(td); });
+    cb.appendChild(tr);
+  }
+}
+
+function renderRing(d) {
+  const svg = $("ring");
+  if (!svg) return;
+  const nodes = (d.cluster && d.cluster.members) || d.members;
+  const w = 360, h = 180, cx = w/2, cy = h, r = 150;
+  let html = '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#30363d"/>';
+  nodes.forEach((m, i) => {
+    const ang = (i / nodes.length) * Math.PI * 2 - Math.PI/2;
+    const x = cx + r*Math.cos(ang), y = cy + r*Math.sin(ang);
+    const mine = m === d.stage.addr;
+    html += '<circle cx="'+x+'" cy="'+y+'" r="7" fill="'+(mine?'#3fb950':'#58a6ff')+'"/>';
+    html += '<text x="'+(x + (x>cx?12:-12))+'" y="'+(y-10)+'" fill="#9aa4b2" font-size="10" text-anchor="'+(x>cx?'start':'end')+'">'+esc(m)+(mine?' ★':'')+'</text>';
+  });
+  svg.innerHTML = html;
+  $("ring-legend").textContent = "成员 " + nodes.length + "；★ = 本 Stage（Booth 所在）";
+}
+
+async function showDetail(roleId, stageName) {
+  const card = $("detail-card"), pre = $("detail");
+  card.style.display = "block";
+  pre.textContent = "加载中…";
+  try {
+    const res = await fetch("/api/inspect?roleId=" + encodeURIComponent(roleId) + "&stageName=" + encodeURIComponent(stageName));
+    const d = await res.json();
+    pre.textContent = JSON.stringify(d, null, 2);
+  } catch (e) { pre.textContent = "✗ " + e; }
 }
 
 async function act(path, body) {

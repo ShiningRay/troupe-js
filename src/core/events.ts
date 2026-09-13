@@ -17,7 +17,11 @@ export type TroupeEventType =
   | "clusterStarted"
   | "membershipChanged"
   | "cueFired"
-  | "cueFailed";
+  | "cueFailed"
+  | "showPublished"
+  | "showDelivered"
+  | "showDropped"
+  | "codeSwapped";
 
 export interface TroupeEvent {
   type: TroupeEventType;

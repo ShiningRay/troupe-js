@@ -103,13 +103,13 @@ async function main(): Promise<void> {
         const r = await directorRoundtrip(opts, "actors", [opts.role ? { role: opts.role } : undefined]);
         if (!r.ok) return `✗ ${r.error}`;
         const actors = r.result as Array<{
-          roleId: string; stageName: string; state: string; queued: number; revision: number; idleMs: number | null;
+          roleId: string; stageName: string; state: string; queued: number; revision: number; idleMs: number | null; codeVersion: number;
         }>;
         if (opts.json) return JSON.stringify(actors, null, 2);
         if (actors.length === 0) return "（无在场 Actor）";
         return table(
-          actors.map((a) => ({ ...a, rev: a.revision || "—", idle: a.idleMs === null ? "—" : fmtMs(a.idleMs) })),
-          [["roleId", "角色"], ["stageName", "stageName"], ["state", "状态"], ["queued", "排队"], ["rev", "rev"], ["idle", "空闲"]],
+          actors.map((a) => ({ ...a, rev: a.revision || "—", idle: a.idleMs === null ? "—" : fmtMs(a.idleMs), ver: `v${a.codeVersion ?? 1}` })),
+          [["roleId", "角色"], ["stageName", "stageName"], ["state", "状态"], ["queued", "排队"], ["rev", "rev"], ["ver", "代码"], ["idle", "空闲"]],
         );
       }
       case "inspect": {
@@ -154,6 +154,33 @@ async function main(): Promise<void> {
           [["roleId", "角色"], ["stageName", "stageName"], ["name", "名称"], ["every", "周期"], ["nextDue", "下次触发"]],
         );
       }
+      case "deploy": {
+        // M11：deploy <roleId> <file> —— 读源码文件，广播部署（经所连 Stage 扇出）
+        const [roleId, file] = rest;
+        if (!roleId || !file) return "用法：deploy <roleId> <file.js>（bundle 需为自包含 JS，导出目标类）";
+        const source = (await import("node:fs")).readFileSync(file, "utf8");
+        const r = await directorRoundtrip(opts, "deploy", [{ roleId, source, className: undefined, policy: "swap", sig: "" }]);
+        if (!r.ok) return `✗ ${r.error}`;
+        return JSON.stringify(r.result, null, 2);
+      }
+      case "rollback": {
+        const [roleId] = rest;
+        if (!roleId) return "用法：rollback <roleId>";
+        const r = await directorRoundtrip(opts, "rollback", [roleId]);
+        if (!r.ok) return `✗ ${r.error}`;
+        return JSON.stringify(r.result, null, 2);
+      }
+      case "booth": {
+        // M9：向目标 Stage 查 roster（含 booth 地址）→ 打开浏览器
+        const r = await directorRoundtrip(opts, "roster", []);
+        if (!r.ok) return `✗ ${r.error}`;
+        const booth = (r.result as { booth?: string | null }).booth;
+        if (!booth) return "✗ 该 Stage 未启用 Booth（form({ booth: true })）";
+        const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+        const { spawn } = await import("node:child_process");
+        spawn(opener, [booth], { detached: true, stdio: "ignore" }).unref();
+        return `✓ Booth：${booth}（已在浏览器打开）`;
+      }
       case "ring": {
         const r = await directorRoundtrip(opts, "ring", []);
         if (!r.ok) return `✗ ${r.error}`;
@@ -161,7 +188,7 @@ async function main(): Promise<void> {
         return opts.json ? JSON.stringify(d, null, 2) : d.nodes.join("\n");
       }
       default:
-        return `未知命令 "${command}"。可用：status roster ps inspect call off cues ring（--to host:port --json --token）`;
+        return `未知命令 "${command}"。可用：status roster ps inspect call off cues ring tail top booth deploy rollback（--to host:port --json --token）`;
     }
   })();
   console.log(out);

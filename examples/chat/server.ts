@@ -27,6 +27,26 @@ interface RoomProps {
 
 const HISTORY_CAP = 200;
 
+/** Show 订阅者（Audience）：旁路审计消息流——与房间逻辑完全解耦（M6） */
+class AuditActor extends Actor<{ count: number; last: unknown }> {
+  static role = "Audit";
+  static initialProps = () => ({ count: 0, last: null });
+
+  override async onStage() {
+    await this.subscribe("chat:lobby"); // 演示：审计 lobby 话题
+  }
+
+  override async onEvent(event: unknown) {
+    this.props.count++;
+    this.props.last = event;
+    await this.saveProps();
+  }
+
+  async stats() {
+    return { count: this.props.count, last: this.props.last };
+  }
+}
+
 export class RoomActor extends Actor<RoomProps> {
   static role = "Room";
   static initialProps = (): RoomProps => ({ seq: 0, messages: [], members: [] });
@@ -51,6 +71,8 @@ export class RoomActor extends Actor<RoomProps> {
       if (this.props.messages.length > HISTORY_CAP) {
         this.props.messages.splice(0, this.props.messages.length - HISTORY_CAP);
       }
+      // 发布到 Show（M6）：订阅者（Audience）异步收到，与房间串行 Turn 解耦
+      await this.publishShow(`chat:${this.stageName}`, { id: msg.id, user: msg.user, text: msg.text });
       return msg;
     });
   }
@@ -106,7 +128,7 @@ async function main(): Promise<void> {
   const port = Number(process.argv[2] ?? process.env.TROUPE_CHAT_PORT ?? 8787);
 
   const troupe = await Troupe.form({
-    actors: [RoomActor],
+    actors: [RoomActor, AuditActor],
     propStore: new SqlitePropStore(".troupe/chat-demo"), // 重启保留历史；rm -rf .troupe 重置
     defaultIntermission: "1m", // 空闲下场：Props 归还，下次消息重新登台（Booth 可观察）
     cluster: { port: 0 },
@@ -197,6 +219,7 @@ async function main(): Promise<void> {
   console.log(`💬 聊天室：http://127.0.0.1:${port}/?room=lobby`);
   console.log(`🎭 Booth 面板：${troupe.boothAddress()}（看 Room Actor 的状态机/revision/事件流）`);
   console.log(`   提示：历史存 .troupe/chat-demo（重启不丢）；Ctrl+C 优雅停机（排空 + 保存）`);
+  console.log(`   Show：消息发布到 chat:<room> 话题；AuditActor 订阅审计（Booth 可见）`);
 
   const shutdown = async () => {
     console.log("\n优雅停机：排空 → offStage + saveProps…");

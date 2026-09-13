@@ -13,12 +13,22 @@ export interface RegisteredActor {
  */
 const processRegistry = new Map<string, RegisteredActor>();
 
+let allowReplace = false;
+
+/** dev 热重载期间允许同 roleId 的新类替换注册（@Performs 重导时不再 fail-fast） */
+export function setAllowReplace(v: boolean): void {
+  allowReplace = v;
+}
+
 export function registerActor(roleId: string, ctor: Function, source: string): void {
   const existing = processRegistry.get(roleId);
   if (existing && existing.ctor !== ctor) {
-    throw new RoleConflictError(
-      `角色名冲突： "${roleId}" 已由 ${existing.source} 注册，又被 ${source} 重复注册（DESIGN §8.5）`,
-    );
+    if (!allowReplace) {
+      throw new RoleConflictError(
+        `角色名冲突： "${roleId}" 已由 ${existing.source} 注册，又被 ${source} 重复注册（DESIGN §8.5）`,
+      );
+    }
+    // dev 重载：新类替换旧注册（Troupe 内部 roleMap 由 reloadActorClass 同步）
   }
   processRegistry.set(roleId, { ctor, source });
 }

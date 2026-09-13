@@ -7,7 +7,10 @@ import type { PropStore, StoredProps } from "../props/prop-store.js";
 import type { ReminderSpec } from "../cues/cue-store.js";
 import type { OwnershipStore } from "../props/ownership.js";
 import type { ActorCueApi } from "../cues/actor-cues.js";
+import type { Audience } from "../show/show.js";
 import type { EventBus, Metrics } from "./events.js";
+import type { TraceBus, TraceEvent } from "./trace.js";
+import { callAls, childSpan } from "./trace-context.js";
 import {
   ActivationError,
   CallRejectedError,
@@ -28,6 +31,8 @@ export interface CallEnvelope {
   deadline: number;
   /** 环漂移转发跳数（§6.3，上限 2）；本地发起为 0 */
   hops?: number;
+  /** W3C traceparent（M8 调用链追踪）：缺席时生成新 trace */
+  traceparent?: string;
 }
 
 export interface StageConfig {
@@ -84,13 +89,19 @@ function estimateCallBytes(env: CallEnvelope): number {
 }
 
 class ActorSlot {
+  /** 角色元数据（可变：热重载 swap 时替换为新版本 meta） */
+  meta: RoleMeta;
   state: SlotState = "activating";
   instance: Actor<any> | null = null;
   /** 激活 single-flight：并发首调共享同一 Promise（DESIGN §5.2） */
   activation: Promise<void> | null = null;
   queue: PendingCall[] = [];
-  looping = false;
-  loopPromise: Promise<void> = Promise.resolve();
+  /** M5 交错调度：在飞 Turn 计数（全部/其中 annotated 类） */
+  inflight = 0;
+  inflightAnnotated = 0;
+  inflightStrict = 0;
+  pumping = false;
+  idleWaiters: Array<() => void> = [];
   idleTimer: ReturnType<typeof setTimeout> | null = null;
   drainWaiters: Array<() => void> = [];
   /** 当前已提交 revision；0 = 尚未落盘（首次保存走 create） */
@@ -107,9 +118,11 @@ class ActorSlot {
 
   constructor(
     readonly key: string,
-    readonly meta: RoleMeta,
+    meta: RoleMeta,
     readonly stageName: string,
-  ) {}
+  ) {
+    this.meta = meta;
+  }
 
   notifyDrained(): void {
     const waiters = this.drainWaiters;
@@ -133,7 +146,7 @@ export class StageManager {
 
   constructor(
     private readonly store: PropStore,
-    private readonly roles: ReadonlyMap<string, RoleMeta>,
+    private readonly roles: Map<string, RoleMeta>,
     private readonly events: EventBus,
     private readonly metrics: Metrics,
     private readonly config: StageConfig,
@@ -141,6 +154,20 @@ export class StageManager {
     private readonly casterRef?: { current?: CastHandle },
     private readonly ownershipRef?: { current?: OwnershipDeps },
     private readonly cueApi?: ActorCueApi,
+    private readonly showApi?: {
+      subscribe(identity: { roleId: string; stageName: string }, topic: string, method?: string): Promise<void>;
+      unsubscribe(identity: { roleId: string; stageName: string }, topic: string, method?: string): Promise<void>;
+    },
+    private readonly showPublish?: (topic: string, event: unknown) => Promise<void>,
+    private readonly traceBus?: TraceBus,
+    private readonly onSpan?: (span: {
+      traceparent: string;
+      roleId: string;
+      stageName: string;
+      method: string;
+      durationMs: number;
+      ok: boolean;
+    }) => void,
   ) {
     if (ownershipRef) {
       // 固定节拍的续期调度器（§6.5）；每 slot 的实际续租间隔由 leaseMs/3 决定（晚绑定后可知）
@@ -235,6 +262,7 @@ export class StageManager {
     queued: number;
     revision: number;
     idleMs: number;
+    codeVersion: number;
   }> {
     const now = this.now();
     return [...this.slots.values()].map((s) => ({
@@ -244,7 +272,63 @@ export class StageManager {
       queued: s.queue.length,
       revision: s.revision,
       idleMs: s.lastActivityAt ? Math.max(0, now - s.lastActivityAt) : -1,
+      codeVersion: s.meta.codeVersion,
     }));
+  }
+
+  /**
+   * 版本应用（M10，DESIGN §9.3）：
+   * - recycle：排空（offStage+save），下次 Call 以新类登台——Props 无损
+   * - swap：quiesce 后 setPrototypeOf 换方法表；onCodeSwap 抛错回滚旧原型（§9.5#7）
+   * - keep：不动（旧实例自然下场，新激活用新 meta——roleMap 已更新）
+   */
+  async applyVersion(
+    roleId: string,
+    meta: RoleMeta,
+    policy: "recycle" | "swap" | "keep",
+    oldVersion: number,
+  ): Promise<{ swapped: number; recycled: number; kept: number }> {
+    const targets = [...this.slots.values()].filter((s) => s.meta.roleId === roleId);
+    this.roles.set(roleId, meta); // 激活/白名单读取此表——换码必须同步（新激活用新类）
+    let swapped = 0;
+    let recycled = 0;
+    for (const slot of targets) {
+      if (policy === "keep") continue;
+      if (policy === "recycle") {
+        await this.drain(slot, "manual");
+        recycled++;
+        continue;
+      }
+      // swap：等在飞 Turn 全部 settle（quiesce）
+      await this.waitIdle(slot);
+      if (slot.state !== "running" || this.slots.get(slot.key) !== slot || !slot.instance) {
+        recycled++; // 期间已被下场（Intermission/管理操作）——等效 recycle
+        continue;
+      }
+      const inst = slot.instance;
+      const oldProto = Object.getPrototypeOf(inst);
+      const oldMeta = slot.meta;
+      Object.setPrototypeOf(inst, meta.ctor.prototype);
+      slot.meta = meta;
+      try {
+        const hook = inst as unknown as { onCodeSwap?: (o: number, n: number) => Promise<void> };
+        await hook.onCodeSwap?.(oldVersion, meta.codeVersion);
+        swapped++;
+        this.events.emit({
+          type: "codeSwapped",
+          roleId,
+          stageName: slot.stageName,
+          at: this.now(),
+          detail: { from: oldVersion, to: meta.codeVersion },
+        });
+      } catch (e) {
+        // §9.5 第 7 条：onCodeSwap 失败 → 恢复旧原型
+        Object.setPrototypeOf(inst, oldProto);
+        slot.meta = oldMeta;
+        throw e;
+      }
+    }
+    return { swapped, recycled, kept: targets.length - swapped - recycled };
   }
 
   // ---- 激活（single-flight）与槽位管理 ----
@@ -378,6 +462,17 @@ export class StageManager {
             this.registerMemoryCue(slot, name, everyMs, fn),
           cancel: (name: string) => this.clearMemoryCue(slot, name),
         },
+        ...(this.showApi
+          ? {
+              show: {
+                subscribe: (topic: string, method?: string) =>
+                  this.showApi!.subscribe({ roleId, stageName }, topic, method),
+                unsubscribe: (topic: string, method?: string) =>
+                  this.showApi!.unsubscribe({ roleId, stageName }, topic, method),
+              },
+            }
+          : {}),
+        ...(this.showPublish ? { publishShow: (topic: string, event: unknown) => this.showPublish!(topic, event) } : {}),
       };
       if (this.casterRef) {
         ctx.cast = (first, targetStage) => {
@@ -577,7 +672,7 @@ export class StageManager {
       slot.lastActivityAt = this.now();
       slot.queue.push({ env, resolve, reject, bytes });
       this.queuedBytes += bytes;
-      this.scheduleLoop(slot);
+      this.pump(slot);
     });
   }
 
@@ -592,46 +687,94 @@ export class StageManager {
     });
   }
 
-  private scheduleLoop(slot: ActorSlot): void {
-    if (slot.looping) return;
-    slot.looping = true;
-    slot.loopPromise = (async () => {
-      let turns = 0;
-      try {
-        for (;;) {
-          const call = this.nextCall(slot);
-          if (!call) break;
-          await this.runTurn(slot, call);
-          // 周期性让出事件循环（§5.3）：防止微任务连续流饿死定时器与 IO
-          if (++turns % TURN_YIELD_INTERVAL === 0) {
-            await new Promise<void>((r) => setImmediate(r));
-          }
-        }
-      } finally {
-        slot.looping = false;
-        this.onQueueEmpty(slot);
-      }
-    })();
+  /** 方法类别（§5.4）：strict=未标注（独占）；annotated=@Improv/@ReadOnly（可与 annotated 交错） */
+  private classOf(meta: RoleMeta, method: string): "strict" | "annotated" {
+    return meta.improv.has(method) || meta.readOnly.has(method) ? "annotated" : "strict";
   }
 
-  /** 弹出下一个未过期 Call；过期者就地拒绝（从未执行，无副作用） */
-  private nextCall(slot: ActorSlot): PendingCall | null {
-    for (;;) {
-      const call = slot.queue.shift();
-      if (!call) return null;
-      this.queuedBytes -= call.bytes;
-      if (this.now() >= call.env.deadline) {
-        this.metrics.rejection(call.env.roleId);
-        this.emitRejected(call.env, slot, "queued-expired");
-        call.reject(
-          new CallTimeoutError(
-            `排队过期：callId=${call.env.callId} 在开始执行前超过 deadline（无副作用，可安全重试）`,
-            "queued",
-          ),
-        );
-        continue;
+  /**
+   * 启动判定（§5.4 组合矩阵）：
+   * - strict：仅在飞为 0 时启动（未标注与任何调用不交错）
+   * - annotated：无 strict 在飞、队列中无等待的 strict（防饿：strict 入队后停止启动新 annotated）、
+   *   在飞全部为 annotated（@Improv×任意标注、@ReadOnly×@ReadOnly/Improv）
+   */
+  private canStartTurn(slot: ActorSlot, call: PendingCall): boolean {
+    if (this.classOf(slot.meta, call.env.method) === "strict") {
+      return slot.inflight === 0;
+    }
+    if (slot.inflight === 0) return true;
+    if (slot.inflightStrict > 0) return false;
+    if (slot.queue.some((c) => this.classOf(slot.meta, c.env.method) === "strict")) return false;
+    return slot.inflightAnnotated === slot.inflight;
+  }
+
+  /** 事件驱动泵：从队首按兼容性尽量启动；Turn settle 后由 startTurn 再次泵入 */
+  private pump(slot: ActorSlot): void {
+    if (slot.pumping) return;
+    slot.pumping = true;
+    try {
+      let turns = 0;
+      for (;;) {
+        if (slot.state !== "running" && slot.state !== "draining") break;
+        const head = slot.queue[0];
+        if (!head) break;
+        if (this.now() >= head.env.deadline) {
+          slot.queue.shift();
+          this.queuedBytes -= head.bytes;
+          this.metrics.rejection(head.env.roleId);
+          this.emitRejected(head.env, slot, "queued-expired");
+          head.reject(
+            new CallTimeoutError(
+              `排队过期：callId=${head.env.callId} 在开始执行前超过 deadline（无副作用，可安全重试）`,
+              "queued",
+            ),
+          );
+          continue;
+        }
+        if (!this.canStartTurn(slot, head)) break;
+        slot.queue.shift();
+        this.queuedBytes -= head.bytes;
+        this.startTurn(slot, head);
+        // 周期性让出事件循环（§5.3）：防止微任务连续流饿死定时器与 IO
+        if (++turns % TURN_YIELD_INTERVAL === 0) {
+          void Promise.resolve().then(() => this.pump(slot));
+          break;
+        }
       }
-      return call;
+    } finally {
+      slot.pumping = false;
+    }
+  }
+
+  private startTurn(slot: ActorSlot, call: PendingCall): void {
+    const cls = this.classOf(slot.meta, call.env.method);
+    slot.inflight++;
+    if (cls === "annotated") slot.inflightAnnotated++;
+    else slot.inflightStrict++;
+    void this.runTurn(slot, call).finally(() => {
+      slot.inflight--;
+      if (cls === "annotated") slot.inflightAnnotated--;
+      else slot.inflightStrict--;
+      this.pump(slot);
+      this.checkIdle(slot);
+      // 空闲计时仅在完全静止时重挂（交错下"瞬时清空"不算空闲完成）
+      if (slot.inflight === 0 && slot.queue.length === 0 && slot.state === "running") {
+        this.scheduleIdle(slot);
+      }
+    });
+  }
+
+  /** quiesce（§5.2）：等待全部在飞 Turn 与排队调用结束 */
+  private waitIdle(slot: ActorSlot): Promise<void> {
+    if (slot.inflight === 0 && slot.queue.length === 0) return Promise.resolve();
+    return new Promise((r) => slot.idleWaiters.push(r));
+  }
+
+  private checkIdle(slot: ActorSlot): void {
+    if (slot.inflight === 0 && slot.queue.length === 0) {
+      const waiters = slot.idleWaiters;
+      slot.idleWaiters = [];
+      for (const w of waiters) w();
     }
   }
 
@@ -648,10 +791,11 @@ export class StageManager {
 
     // 接收端白名单（§6.1 防御纵深；Agent 侧已过滤一次）
     const inst = slot.instance;
-    // onCue / __memoryCue__ 是调度器内部专用通道（集群边缘/Agent 白名单不暴露，仅本地分派）
+    // onCue / onEvent / __memoryCue__ 是内部专用通道（集群边缘白名单不暴露，仅调度分派）
     if (
       !inst ||
       (env.method !== "onCue" &&
+        env.method !== "onEvent" &&
         env.method !== "__memoryCue__" &&
         !slot.meta.rpcMethods.has(env.method))
     ) {
@@ -666,16 +810,20 @@ export class StageManager {
       return;
     }
 
+    const caller = (env as CallEnvelope & { from?: string }).from ?? "local";
+    let outcome: TraceEvent["outcome"] = "completed";
+    const span = childSpan(env.traceparent); // 继承 traceId（跨 Stage/Actor 链路），新 spanId
     const exec =
       env.method === "__memoryCue__"
         ? (async () => {
             const cue = slot.memoryCues.get(env.args[0] as string);
             if (!cue) return undefined; // 已注销：静默完成
-            return await cue.fn();
+            // ALS 绑定：方法内 this.cast 自动携带本 Turn span 作为父（§11.4）
+            return callAls.run(span, () => cue.fn());
           })()
         : (async () => {
             const fn = (inst as unknown as Record<string, (...a: unknown[]) => unknown>)[env.method];
-            return await fn.apply(inst, env.args);
+            return callAls.run(span, () => fn.apply(inst, env.args));
           })();
 
     const timeoutMs = Math.max(0, env.deadline - this.now());
@@ -684,6 +832,7 @@ export class StageManager {
     const timeoutPromise = new Promise<never>((_, timeoutReject) => {
       timer = setTimeout(() => {
         if (answered) return; // 调用方已拿到结果，超时作废
+        outcome = "timeout";
         timeoutReject(
           new CallTimeoutError(
             `执行超时（${timeoutMs}ms）：${env.roleId}/${env.stageName}.${env.method} 结果未知；执行占用保持到原执行结束（DESIGN §5.1）`,
@@ -716,7 +865,28 @@ export class StageManager {
       execOk = false;
     }
 
-    this.metrics.call(env.roleId, this.now() - startedAt, execOk);
+    const durationMs = this.now() - startedAt;
+    this.metrics.call(env.roleId, durationMs, execOk);
+    this.traceBus?.record({
+      callId: env.callId,
+      roleId: env.roleId,
+      stageName: env.stageName,
+      method: env.method,
+      caller,
+      durationMs,
+      ok: execOk,
+      outcome,
+      at: this.now(),
+      traceparent: span.traceparent,
+    });
+    this.onSpan?.({
+      traceparent: span.traceparent,
+      roleId: env.roleId,
+      stageName: env.stageName,
+      method: env.method,
+      durationMs,
+      ok: execOk,
+    });
     this.events.emit({
       type: "turnEnded",
       roleId: env.roleId,
@@ -728,12 +898,6 @@ export class StageManager {
   }
 
   // ---- 空闲回收与排空 ----
-
-  private onQueueEmpty(slot: ActorSlot): void {
-    if (this.slots.get(slot.key) !== slot) return;
-    if (slot.state !== "running") return;
-    this.scheduleIdle(slot);
-  }
 
   private scheduleIdle(slot: ActorSlot): void {
     this.clearIdle(slot);
@@ -769,8 +933,9 @@ export class StageManager {
       detail: { reason },
     });
 
-    // quiesce：等所有运行中 Turn 与框架回调结束（§5.2；非只等"当前 turn"）
-    await slot.loopPromise;
+    // quiesce（§5.2）：等待全部在飞 Turn 与排队调用结束（交错开启时含所有并发请求）
+    this.pump(slot);
+    await this.waitIdle(slot);
 
     // offStage/save 期间可能已失效（跨 await 的状态变化，显式放宽收窄）
     if ((slot.state as SlotState) === "invalid") {

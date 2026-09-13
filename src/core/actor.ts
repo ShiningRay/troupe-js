@@ -25,6 +25,13 @@ export interface ActorContext {
     register(name: string, everyMs: number, fn: () => void | Promise<void>): void;
     cancel(name: string): void;
   };
+  /** Show 订阅（M6）：以本 Actor 为 Audience 注册回调 */
+  show?: {
+    subscribe(topic: string, method?: string): Promise<void>;
+    unsubscribe(topic: string, method?: string): Promise<void>;
+  };
+  /** Show 发布（M6）：向话题发布事件 */
+  publishShow?(topic: string, event: unknown): Promise<void>;
 }
 
 const CTX = Symbol("troupe.actorCtx");
@@ -147,6 +154,30 @@ export abstract class Actor<TProps = unknown> {
     this[CTX]?.memoryCues?.cancel(name);
   }
 
+  /**
+   * 订阅 Show 话题（M6）：以本 Actor 为 Audience——事件经 onEvent（或指定方法）
+   * 作为一条 Call 进入串行 Turn；Actor 不在场会重新登台处理。
+   */
+  protected async subscribe(topic: string, method = "onEvent"): Promise<void> {
+    const show = this[CTX]?.show;
+    if (!show) throw new TroupeError("Show 订阅不可用（运行时未注入）");
+    return show.subscribe(topic, method);
+  }
+
+  /** 退订话题 */
+  protected async unsubscribe(topic: string, method = "onEvent"): Promise<void> {
+    const show = this[CTX]?.show;
+    if (!show) throw new TroupeError("Show 订阅不可用（运行时未注入）");
+    return show.unsubscribe(topic, method);
+  }
+
+  /** 向 Show 话题发布事件（M6）：订阅者经 Audience 管道异步收到（尽力而为） */
+  protected async publishShow(topic: string, event: unknown): Promise<void> {
+    const publish = this[CTX]?.publishShow;
+    if (!publish) throw new TroupeError("Show 发布不可用（运行时未注入）");
+    return publish(topic, event);
+  }
+
   /** 登台钩子：this.props 已就绪（可选） */
   async onStage(): Promise<void> {}
 
@@ -158,6 +189,19 @@ export abstract class Actor<TProps = unknown> {
    * 至少一次投递——业务需按 (name, payload) 幂等（§7.5）。
    * 默认实现分派到 @Cron/@Every 装饰的同名方法；覆写时可 super.onCue 兜底。
    */
+  /**
+   * Show 订阅的默认回调入口（M6）：subscribe(topic) 不指定方法时使用。
+   * 覆写以处理事件；内部通道（集群边缘白名单不暴露，仅 Show 投递分派）。
+   */
+  async onEvent(event: unknown): Promise<void> {}
+
+  /**
+   * 热替换钩子（M10，DESIGN §9.5/§9.6）：@swap 换码成功后调用（原型已替换、
+   * 实例与内存状态保留）。用于重建模块级可变单例（对标 OTP code_change）。
+   * 抛错 → 回滚旧原型（§9.5 第 7 条）。
+   */
+  async onCodeSwap(_oldVersion: number, _newVersion: number): Promise<void> {}
+
   async onCue(name: string, payload: unknown): Promise<void> {
     const decorated = decoratedCueHandler(this.constructor, name);
     if (decorated !== null) {

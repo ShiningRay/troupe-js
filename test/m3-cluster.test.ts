@@ -111,11 +111,11 @@ describe("M3 验收：正常扩容交接（旧持有者排空落盘释放，无�
 
     // 找一批归属 B 的键并写入
     const candidates: string[] = [];
-    for (let i = 0; i < 200 && candidates.length < 8; i++) {
+    for (let i = 0; i < 2000 && candidates.length < 40; i++) {
       const n = `h${i}-${Math.random().toString(36).slice(2, 6)}`;
       if (a.troupe.ownerOf("OwnCart", n) === b.troupe.clusterAddress()) candidates.push(n);
     }
-    expect(candidates.length).toBeGreaterThanOrEqual(4);
+    expect(candidates.length).toBeGreaterThanOrEqual(20);
     for (const k of candidates) {
       await retryTransient(() => a.troupe.cast(OwnCartActor, k).add("seed"));
     }

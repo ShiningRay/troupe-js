@@ -93,14 +93,16 @@ export class Booth {
 
   private pushAll(): void {
     if (this.sseClients.size === 0) return;
-    const frame = `data: ${JSON.stringify(this.overview())}\n\n`;
-    for (const res of this.sseClients) {
-      try {
-        res.write(frame);
-      } catch {
-        this.sseClients.delete(res);
+    void this.overview().then((snapshot) => {
+      const frame = `data: ${JSON.stringify(snapshot)}\n\n`;
+      for (const res of this.sseClients) {
+        try {
+          res.write(frame);
+        } catch {
+          this.sseClients.delete(res);
+        }
       }
-    }
+    });
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -112,7 +114,17 @@ export class Booth {
         return;
       }
       if (req.method === "GET" && url.pathname === "/api/overview") {
-        this.json(res, 200, this.overview());
+        this.json(res, 200, await this.overview());
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/api/inspect") {
+        const roleId = url.searchParams.get("roleId") ?? "";
+        const stageName = url.searchParams.get("stageName") ?? "";
+        try {
+          this.json(res, 200, await this.troupe.director().inspect(roleId, stageName));
+        } catch (e) {
+          this.json(res, 400, { error: e instanceof Error ? e.message : String(e) });
+        }
         return;
       }
       if (req.method === "GET" && url.pathname === "/healthz") {
@@ -159,11 +171,11 @@ export class Booth {
         });
         res.flushHeaders?.();
         this.sseClients.add(res);
-        try {
-          res.write(`data: ${JSON.stringify(this.overview())}\n\n`);
-        } catch {
-          this.sseClients.delete(res);
-        }
+        void this.overview()
+          .then((snapshot) => {
+            res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+          })
+          .catch(() => this.sseClients.delete(res));
         req.on("close", () => this.sseClients.delete(res));
         return;
       }
@@ -213,8 +225,20 @@ export class Booth {
     }
   }
 
-  private overview() {
+  private clusterCache: { at: number; data: unknown } | null = null;
+
+  private async overview() {
     const members = this.troupe.clusterMembers();
+    let cluster: unknown = null;
+    try {
+      // 聚合扇出较重（逐成员 dir 请求）：2s 缓存
+      if (!this.clusterCache || Date.now() - this.clusterCache.at > 2_000) {
+        this.clusterCache = { at: Date.now(), data: await this.troupe.director().cluster() };
+      }
+      cluster = this.clusterCache.data;
+    } catch {
+      cluster = null; // 失败降级为本地视图
+    }
     return {
       stage: {
         addr: this.troupe.clusterAddress() ?? `local:${process.pid}`,
@@ -235,6 +259,9 @@ export class Booth {
         method: e.method,
         at: e.at,
       })),
+      cluster, // M9：聚合视图（各 Stage booth/pid + 全集群 actors/cues）
+      cues: (await this.troupe.director().cues().catch(() => [])) as unknown[],
+      traces: this.troupe.traces(120), // M6 总线对接（Live Trace）
     };
   }
 

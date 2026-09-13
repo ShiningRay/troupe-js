@@ -27,6 +27,8 @@ export interface WireCall {
   args: unknown[];
   deadline: number;
   hops: number;
+  /** W3C traceparent（跨 Stage 调用链传播，§11.4） */
+  traceparent?: string;
 }
 
 export interface WireResponse {
@@ -43,6 +45,16 @@ export interface WireMember {
   state: "alive" | "suspect" | "dead";
 }
 
+export interface WireShow {
+  t: "sub" | "unsub" | "pub";
+  /** pub 请求-响应关联用（sub/unsub 为单向消息可省略） */
+  callId?: string;
+  from: string;
+  topic: string;
+  audience?: { roleId: string; stageName: string; method: string };
+  event?: unknown;
+}
+
 export interface WireDirector {
   t: "dir";
   callId: string;
@@ -56,6 +68,7 @@ export type WireMessage =
   | WireCall
   | WireResponse
   | WireDirector
+  | WireShow
   | { t: "join"; from: string; inc: number; protocol: number; roles: string[] }
   | { t: "join-nack"; from: string; reason: string }
   | { t: "roster"; from: string; inc: number; members: WireMember[] }

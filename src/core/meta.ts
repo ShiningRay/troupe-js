@@ -17,6 +17,8 @@ export interface RoleMeta {
   timeouts: ReadonlyMap<string, number>;
   schemaVersion: number;
   initialProps: () => unknown;
+  /** 代码版本（M10 热重载）：初始 1，reloadActorClass 递增 */
+  codeVersion: number;
   /** RPC 白名单：原型链上的公开方法（生命周期/基类成员/下划线开头者除外） */
   rpcMethods: ReadonlySet<string>;
   /** 声明式持久提醒（@Cron/@Every）：方法名 → 计划 */
@@ -113,6 +115,7 @@ const RESERVED_MEMBERS = new Set([
   "idempotent",
   "migrateProps",
   "onCue",
+  "onCodeSwap",
 ]);
 
 function resolveRoleId(ctor: Function, decoratorRole?: string): string {
@@ -173,6 +176,7 @@ export function describeRole(
     timeouts?: Record<string, string | number>;
     schemaVersion?: number;
     initialProps?: () => unknown;
+    codeVersion?: number;
   };
 
   const roleId = resolveRoleId(ctor, deco.role);
@@ -187,11 +191,6 @@ export function describeRole(
   }
 
   const warnings: string[] = [];
-  for (const m of [...improv, ...readOnly]) {
-    warnings.push(
-      `M1 严格串行：${roleId}.${m} 的 @Improv/@ReadOnly 标注暂按串行执行（交错执行为后续里程碑，DESIGN §5.4）`,
-    );
-  }
 
   registerDecoratedCues(ctor, persistentCues.keys());
 
@@ -205,6 +204,7 @@ export function describeRole(
       timeouts,
       schemaVersion: statics.schemaVersion ?? 1,
       initialProps: statics.initialProps?.bind(ctor) ?? (() => ({})),
+      codeVersion: statics.codeVersion ?? 1,
       rpcMethods: names,
       persistentCues,
       localCues,

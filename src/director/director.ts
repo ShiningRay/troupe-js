@@ -14,6 +14,14 @@ export interface DirectorDeps {
   invoke(roleId: string, stageName: string, method: string, args: unknown[]): Promise<unknown>;
   off(roleId: string, stageName: string): Promise<void>;
   cueList(): Promise<ReminderRecord[]>;
+  traces(n: number, filter?: { roleId?: string; method?: string }): unknown[];
+  /** 本 Stage 的 Booth 地址（未启用为 null；roster 返回） */
+  boothAddr?: string | null;
+  /** 集群聚合（M9）：跨 Stage 扇出汇总；未启用集群时缺省（cluster 方法报“未启用”） */
+  clusterAggregate?: () => Promise<unknown>;
+  /** 生产热替换（M11）：本 Stage 部署 / 回滚 */
+  deployLocal?: (bundle: unknown) => Promise<unknown>;
+  rollbackDeploy?: (roleId: string) => Promise<unknown>;
   propStore: PropStore;
   namespace: string;
   pid: number;
@@ -28,6 +36,10 @@ export const DIRECTOR_METHODS = [
   "off",
   "cues",
   "ring",
+  "traces",
+  "cluster",
+  "deploy",
+  "rollback",
 ] as const;
 
 export type DirectorMethod = (typeof DIRECTOR_METHODS)[number];
@@ -43,7 +55,25 @@ export async function directorCall(method: string, args: unknown[], deps: Direct
         node: process.version,
         namespace: deps.namespace,
         roles: deps.repertoire,
+        booth: deps.boothAddr ?? null,
       };
+    case "cluster":
+      if (!deps.clusterAggregate) {
+        throw new CallRejectedError("未启用集群：cluster 聚合仅多 Stage 模式可用（§11.1）", "whitelist", false);
+      }
+      return deps.clusterAggregate();
+    case "deploy": {
+      if (!deps.deployLocal) {
+        throw new CallRejectedError("deploy 通道未就绪（§9.4）", "whitelist", false);
+      }
+      return deps.deployLocal(args[0]);
+    }
+    case "rollback": {
+      if (!deps.rollbackDeploy) {
+        throw new CallRejectedError("rollback 通道未就绪（§9.4）", "whitelist", false);
+      }
+      return deps.rollbackDeploy(args[0] as string);
+    }
     case "actors": {
       const filter = args[0] as { role?: string } | undefined;
       const slots = deps.slots();
@@ -118,6 +148,10 @@ export async function directorCall(method: string, args: unknown[], deps: Direct
       return {
         nodes: deps.selfAddr ? [deps.selfAddr, ...deps.members] : [`local:${deps.pid}`],
       };
+    case "traces": {
+      const [n, filter] = args as [number, { roleId?: string; method?: string } | undefined];
+      return deps.traces(Number(n) || 50, filter);
+    }
     default:
       throw new CallRejectedError(
         `未知 Director 方法 "${method}"（可用：${DIRECTOR_METHODS.join(", ")}）`,

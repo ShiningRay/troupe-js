@@ -72,3 +72,13 @@ export class SerializationError extends TroupeError {}
 
 /** 激活失败：加载、迁移或 onStage() 抛错（DESIGN §5.2 状态机） */
 export class ActivationError extends TroupeError {}
+
+/** swap 守则静态检查违规（DESIGN §9.5）：不合规代码拒绝 swap */
+export class SwapViolationError extends TroupeError {
+  constructor(
+    message: string,
+    readonly violations: string[],
+  ) {
+    super(message);
+  }
+}

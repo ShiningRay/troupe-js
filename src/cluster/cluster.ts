@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { CallEnvelope } from "../core/stage-manager.js";
 import type { RoleMeta } from "../core/meta.js";
 import type { EventBus, TroupeEvent } from "../core/events.js";
@@ -19,6 +20,8 @@ import {
 } from "./transport.js";
 import { Roster } from "./roster.js";
 import { Playbill } from "./playbill.js";
+import { ShowBroker } from "../show/show.js";
+import type { Audience } from "../show/show.js";
 
 export interface ClusterOptions {
   /** 绑定地址，dev 默认 127.0.0.1（§8.2；开放监听属生产模式，M3） */
@@ -48,6 +51,7 @@ export class Cluster {
   private readonly transport: Transport;
   private roster: Roster | null = null;
   private readonly playbill: Playbill;
+  private readonly broker: ShowBroker;
   private stopped = false;
   selfAddr = "";
   private stageIdValue = "";
@@ -60,10 +64,36 @@ export class Cluster {
       localExec: (env: CallEnvelope) => Promise<unknown>;
       /** Director 通道（DESIGN §11.1）：由 Troupe.form 晚绑定注入 */
       directorRef?: { current?: (method: string, args: unknown[]) => Promise<unknown> };
+      /** Show 通道（M6）：deliver 由 Troupe.form 晚绑定注入（经完整调用管道） */
+      showDeliver?: (audience: Audience, topic: string, event: unknown) => Promise<void>;
     },
     private readonly opts: ClusterOptions = {},
   ) {
     this.playbill = new Playbill(deps.namespace, []);
+    this.broker = new ShowBroker({
+      namespace: deps.namespace,
+      isShowOwner: (t) => this.showOwnerOf(t) === this.selfAddr,
+      forward: (topic, kind, audience, event) => {
+        const owner = this.showOwnerOf(topic);
+        if (!owner || owner === this.selfAddr) return;
+        void this.transport
+          .send(owner, { t: kind, from: this.selfAddr, topic, audience, event })
+          .catch(() => {});
+      },
+      deliver: async (audience, topic, event) => {
+        if (!deps.showDeliver) throw new TroupeError("Show 投递通道未就绪");
+        await deps.showDeliver(audience, topic, event);
+      },
+      onEvent: (kind, topic, detail) => {
+        deps.events.emit({
+          type: kind === "published" ? "showPublished" : kind === "delivered" ? "showDelivered" : "showDropped",
+          roleId: "<show>",
+          method: topic,
+          at: Date.now(),
+          detail,
+        });
+      },
+    });
     const handler: TransportHandler = (msg, reply) => this.onWire(msg, reply);
     this.transport = new Transport(handler);
   }
@@ -130,6 +160,152 @@ export class Cluster {
     return this.playbill.ownerOf(roleId, stageName);
   }
 
+  // ---- Show（M6）----
+
+  private showOwnerOf(topic: string): string | null {
+    return this.playbill.ownerOfKey(`show:${topic}`);
+  }
+
+  subscribe(topic: string, audience: Audience): void {
+    const owner = this.showOwnerOf(topic);
+    if (!owner || owner === this.selfAddr) this.broker.subscribe(topic, audience);
+    else
+      void this.transport
+        .send(owner, { t: "sub", from: this.selfAddr, topic, audience })
+        .catch(() => {});
+  }
+
+  unsubscribe(topic: string, audience: Audience): void {
+    const owner = this.showOwnerOf(topic);
+    if (!owner || owner === this.selfAddr) this.broker.unsubscribe(topic, audience);
+    else
+      void this.transport
+        .send(owner, { t: "unsub", from: this.selfAddr, topic, audience })
+        .catch(() => {});
+  }
+
+  /** 发布：本 Stage 是 coordinator 直接 fan-out，否则转发给归属 Stage */
+  async publish(topic: string, event: unknown): Promise<void> {
+    const owner = this.showOwnerOf(topic);
+    if (owner && owner !== this.selfAddr) {
+      const callId = randomUUID();
+      await this.transport.request(
+        owner,
+        { t: "pub", callId, from: this.selfAddr, topic, event },
+        callId,
+        10_000,
+      );
+      return;
+    }
+    await this.broker.publish(topic, event);
+  }
+
+  showSubscriberCount(topic: string): number {
+    return this.broker.subscriberCount(topic);
+  }
+
+  /** 部署广播（M11，§9.4）：向所有成员（含自身）扇出 dir deploy 并汇总结果 */
+  async deployBroadcast(
+    bundle: { roleId: string; source: string; className?: string; policy: "swap"; sig: string },
+  ): Promise<Array<{ stage: string } & Record<string, unknown>>> {
+    const members = [this.selfAddr, ...this.roster?.aliveMembers() ?? []];
+    const token = process.env.TROUPE_ADMIN_TOKEN;
+    const results = await Promise.allSettled(
+      members.map(async (addr) => {
+        const callId = randomUUID();
+        const res = await this.transport.request(
+          addr,
+          {
+            t: "dir",
+            callId,
+            from: this.selfAddr,
+            method: "deploy",
+            args: [bundle],
+            ...(token ? { token } : {}),
+          },
+          callId,
+          30_000,
+        );
+        if (!res.ok) throw new Error(res.err?.message ?? "deploy 失败");
+        return res.result as Record<string, unknown>;
+      }),
+    );
+    return results.map((r, i) =>
+      r.status === "fulfilled"
+        ? { stage: members[i], ...(r.value as Record<string, unknown>) }
+        : { stage: members[i], error: String(r.reason).replace(/^Error: /, "") },
+    );
+  }
+
+  /** Director 集群聚合（M9，§11.1）：向所有成员（含自身）扇出 dir 请求并汇总 */
+  async aggregateDirector(): Promise<unknown> {
+    const members = [this.selfAddr, ...this.roster?.aliveMembers() ?? []];
+    const token = process.env.TROUPE_ADMIN_TOKEN;
+    const stages = await Promise.allSettled(
+      members.map(async (addr) => {
+        const callId = randomUUID();
+        const res = await this.transport.request(
+          addr,
+          { t: "dir", callId, from: this.selfAddr, method: "roster", args: [], ...(token ? { token } : {}) },
+          callId,
+          5_000,
+        );
+        if (!res.ok) throw new Error(res.err?.message ?? "roster 失败");
+        return { addr, roster: res.result as Record<string, unknown> };
+      }),
+    );
+    const actors = await Promise.allSettled(
+      members.map(async (addr) => {
+        const callId = randomUUID();
+        const res = await this.transport.request(
+          addr,
+          { t: "dir", callId, from: this.selfAddr, method: "actors", args: [], ...(token ? { token } : {}) },
+          callId,
+          5_000,
+        );
+        if (!res.ok) throw new Error(res.err?.message ?? "actors 失败");
+        return { addr, actors: res.result as Array<Record<string, unknown>> };
+      }),
+    );
+    const cues = await Promise.allSettled(
+      members.map(async (addr) => {
+        const callId = randomUUID();
+        const res = await this.transport.request(
+          addr,
+          { t: "dir", callId, from: this.selfAddr, method: "cues", args: [], ...(token ? { token } : {}) },
+          callId,
+          5_000,
+        );
+        if (!res.ok) throw new Error(res.err?.message ?? "cues 失败");
+        return { addr, cues: res.result as Array<Record<string, unknown>> };
+      }),
+    );
+    const okValue = (r: PromiseSettledResult<{ addr: string; [k: string]: unknown }>) =>
+      r.status === "fulfilled" ? (r.value as Record<string, unknown>) : null;
+    return {
+      self: this.selfAddr,
+      members,
+      stages: stages.map((r, i) => {
+        const v = okValue(r);
+        const roster = (v?.roster ?? null) as Record<string, unknown> | null;
+        return roster
+          ? { stage: members[i], booth: roster.booth ?? null, pid: roster.pid, roles: roster.roles }
+          : { stage: members[i], unreachable: true };
+      }),
+      actors: actors.flatMap((r, i) => {
+        const v = okValue(r);
+        return ((v?.actors ?? []) as Array<Record<string, unknown>>).map((x) => ({
+          ...x,
+          stage: members[i],
+        }));
+      }),
+      cues: cues.flatMap((r, i) => {
+        const v = okValue(r);
+        return ((v?.cues ?? []) as Array<Record<string, unknown>>).map((x) => ({ ...x, stage: members[i] }));
+      }),
+    };
+  }
+
   /** 出站路由：归属自己（或无成员视图）→ 本地；否则转发到归属 Stage */
   async route(env: CallEnvelope): Promise<unknown> {
     if (this.stopped) {
@@ -166,7 +342,51 @@ export class Cluster {
       void this.handleDirector(msg, reply);
       return;
     }
+    if (msg.t === "sub" || msg.t === "unsub" || msg.t === "pub") {
+      void this.handleShow(msg, reply);
+      return;
+    }
     this.roster?.handle(msg, reply);
+  }
+
+  private async handleShow(
+    msg: Extract<WireMessage, { t: "sub" } | { t: "unsub" } | { t: "pub" }>,
+    reply: ReplyFn,
+  ): Promise<void> {
+    const callId = msg.callId ?? "show";
+    try {
+      if (typeof msg.topic !== "string") throw new CallRejectedError("show 信封需要 topic", "whitelist", false);
+      const owner = this.showOwnerOf(msg.topic);
+      if (owner && owner !== this.selfAddr) {
+        // 话题视图漂移：再转发一层（当前实现不计数——show 转发非热路径）
+        void this.transport.send(owner, msg).catch(() => {});
+        reply({ t: "res", callId, ok: true, result: null });
+        return;
+      }
+      if (msg.t === "pub") {
+        await this.broker.publish(msg.topic, msg.event);
+        reply({ t: "res", callId, ok: true, result: null });
+        return;
+      }
+      if (msg.audience) {
+        if (msg.t === "sub") this.broker.subscribe(msg.topic, msg.audience);
+        else this.broker.unsubscribe(msg.topic, msg.audience);
+      }
+      reply({ t: "res", callId, ok: true, result: null });
+    } catch (e) {
+      reply({
+        t: "res",
+        callId,
+        ok: false,
+        err: {
+          kind: "rejected",
+          name: "CallRejectedError",
+          message: e instanceof Error ? e.message : String(e),
+          reason: "whitelist",
+          retryable: false,
+        },
+      });
+    }
   }
 
   /** Director 通道（§11.1）：TROUPE_ADMIN_TOKEN 设置后必须携带匹配 token */
@@ -211,7 +431,7 @@ export class Cluster {
       ) {
         throw new CallRejectedError("信封字段非法（§6.1）", "whitelist", false);
       }
-      const env: CallEnvelope = {
+      const env: CallEnvelope & { from?: string } = {
         callId,
         roleId: msg.to.roleId,
         stageName: msg.to.stageName,
@@ -219,6 +439,8 @@ export class Cluster {
         args: msg.args,
         deadline: msg.deadline,
         hops: (msg.hops ?? 0) + 1,
+        from: msg.from, // trace 调用方（§11.4）
+        traceparent: msg.traceparent, // 调用链跨 Stage 传播（§11.4）
       };
       const owner = this.ownerOf(env.roleId, env.stageName);
       if (owner && owner !== this.selfAddr) {

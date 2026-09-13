@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { Actor, ActorCtor } from "./core/actor.js";
 import { EventBus, Metrics, type TroupeEvent } from "./core/events.js";
+import { TraceBus, type TraceFilter } from "./core/trace.js";
+import { callAls, newSpan } from "./core/trace-context.js";
+import { scanActorSource } from "./hot/reload.js";
+import type { ReloadPolicy } from "./hot/reload.js";
+import { compatViolations, evaluateBundle, verifyBundle, DeployHistory, type DeployBundle } from "./hot/deploy.js";
+import { SwapViolationError } from "./core/errors.js";
 import {
   CallRejectedError,
   RoleConflictError,
@@ -26,6 +32,7 @@ import { SqliteCueStore } from "./cues/sqlite.js";
 import { CueScheduler } from "./cues/scheduler.js";
 import type { ActorCueApi } from "./cues/actor-cues.js";
 import { directorCall, type DirectorDeps } from "./director/director.js";
+import type { Audience } from "./show/show.js";
 
 export interface TroupeOptions {
   /** 显式注册（推荐，DESIGN §3.2/§8.3）；缺省取 @Performs 进程注册表快照 */
@@ -61,6 +68,17 @@ export interface TroupeOptions {
    * Actor 内经 scheduleReminder/cancelReminder/onCue 使用。
    */
   cues?: boolean | { store?: CueStore; tickMs?: number };
+  /** BoxOffice（M8）：WebSocket 客户端网关（ticket 鉴权，浏览器直拿 Agent） */
+  boxoffice?: boolean | { host?: string; port?: number; token?: string | null };
+  /** OTel 桥（M8）：每个 Turn 结束回调（W3C traceparent），桥接真实 OTel SDK 用 */
+  onSpan?: (span: {
+    traceparent: string;
+    roleId: string;
+    stageName: string;
+    method: string;
+    durationMs: number;
+    ok: boolean;
+  }) => void;
   /** Booth 预览版：内省面板（loopback，默认 7500；完整版属 M9） */
   booth?: boolean | BoothOptions;
   /** 测试注入时钟（PLAN M1 测试注入接口） */
@@ -93,7 +111,122 @@ export class Troupe {
     private readonly namespaceValue: string,
     private readonly cueScheduler: CueScheduler | null,
     private readonly cuesEnabled: boolean,
+    private readonly localSubs: Map<string, Map<string, Audience>>,
+    private readonly traceBus: TraceBus,
+    private readonly deployHistory = new DeployHistory(),
   ) {}
+
+  // ---- 生产热替换（M11，DESIGN §9.4，独立实验）----
+
+  /**
+   * 部署一个 bundle 到本 Stage：验签 → data: 求值 → 兼容静态检查（L3 规则）→
+   * swap 热替换（不打断流量：排队请求在换码后继续）。
+   */
+  async deployLocal(bundle: DeployBundle): Promise<{ roleId: string; fromVersion: number; toVersion: number }> {
+    const secret = process.env.TROUPE_DEPLOY_SECRET;
+    if (secret && !verifyBundle(bundle, secret)) {
+      throw new TroupeError(`部署被拒：签名校验失败（${bundle.roleId}）——bundle 疑被篡改（§9.4）`);
+    }
+    const existing = this.roleMap.get(bundle.roleId);
+    if (!existing) {
+      throw new TroupeError(`部署被拒：角色 "${bundle.roleId}" 未在本 Stage 注册（§9.4）`);
+    }
+    const ctor = await evaluateBundle(bundle);
+    const probe = describeRole(ctor, { intermissionMs: existing.intermissionMs });
+    if (probe.meta.roleId !== bundle.roleId) {
+      throw new TroupeError(`部署被拒：bundle 类解析出角色 "${probe.meta.roleId}" ≠ 目标 "${bundle.roleId}"`);
+    }
+    const violations = compatViolations(existing, ctor, probe.meta);
+    if (violations.length > 0) {
+      throw new TroupeError(`部署被拒：不兼容变更（${violations.length} 条）\n- ${violations.join("\n- ")}`);
+    }
+    this.deployHistory.push(bundle.roleId, bundle);
+    const applied = await this.reloadActorClass(ctor, { policy: "swap", source: bundle.source });
+    return { roleId: bundle.roleId, fromVersion: applied.fromVersion, toVersion: applied.toVersion };
+  }
+
+  /** 一键回滚：重新部署上一已接受版本（§9.4 回滚规则） */
+  async rollbackDeploy(roleId: string): Promise<{ roleId: string; toVersion: number } | { error: string }> {
+    const prev = this.deployHistory.previous(roleId);
+    if (!prev) return { error: `无可回滚版本：${roleId} 的部署历史不足` };
+    return await this.deployLocal(prev);
+  }
+
+  /** 广播部署：本 Stage 执行 + 扇出全部成员，返回各 Stage 结果（§9.4 下发通道） */
+  async deployCluster(bundle: DeployBundle): Promise<Array<{ stage: string } & Record<string, unknown>>> {
+    if (!this.cluster) throw new TroupeError("deployCluster 需要集群模式（单 Stage 用 deployLocal）");
+    return this.cluster.deployBroadcast(bundle);
+  }
+
+  // ---- Trace（M6，DESIGN §11.4）----
+
+  /** 历史查询：最新 n 条（新的在前） */
+  traces(n: number, filter?: TraceFilter) {
+    return this.traceBus.latest(n, filter);
+  }
+
+  /** 实时订阅；返回退订函数 */
+  subscribeTrace(filter: TraceFilter | undefined, fn: (e: unknown) => void): () => void {
+    return this.traceBus.live(filter, fn);
+  }
+
+  // ---- Show（M6，DESIGN §2：演出，可演可看）----
+
+  /** 发布事件到话题；订阅者（Audience）经完整调用管道异步收到（尽力而为，at-most-once） */
+  async publish(topic: string, event: unknown): Promise<void> {
+    if (this.cluster) return this.cluster.publish(topic, event);
+    const subs = this.localSubs.get(topic);
+    if (!subs || subs.size === 0) return;
+    await Promise.allSettled(
+      [...subs.values()].map(async (audience) => {
+        const key = `${audience.roleId}/${audience.stageName}.${audience.method}`;
+        try {
+          await this.stageManager.call({
+            callId: randomUUID(),
+            roleId: audience.roleId,
+            stageName: audience.stageName,
+            method: audience.method,
+            args: [event],
+            deadline: this.now() + this.defaultTimeoutMs,
+            hops: 0,
+          });
+          this.events.emit({
+            type: "showDelivered",
+            roleId: "<show>",
+            method: topic,
+            at: this.now(),
+            detail: { audience: key },
+          });
+        } catch (e) {
+          this.events.emit({
+            type: "showDropped",
+            roleId: "<show>",
+            method: topic,
+            at: this.now(),
+            detail: { audience: key, error: e instanceof Error ? e.message : String(e) },
+          });
+        }
+      }),
+    );
+  }
+
+  /** 订阅（Edge/测试用便捷门面；Actor 内推荐 this.subscribe） */
+  async subscribe(topic: string, audience: Audience): Promise<void> {
+    if (this.cluster) return this.cluster.subscribe(topic, audience);
+    let subs = this.localSubs.get(topic);
+    if (!subs) {
+      subs = new Map();
+      this.localSubs.set(topic, subs);
+    }
+    subs.set(`${audience.roleId}\u0000${audience.stageName}\u0000${audience.method}`, audience);
+  }
+
+  async unsubscribe(topic: string, audience: Audience): Promise<void> {
+    if (this.cluster) return this.cluster.unsubscribe(topic, audience);
+    this.localSubs.get(topic)?.delete(
+      `${audience.roleId}\u0000${audience.stageName}\u0000${audience.method}`,
+    );
+  }
 
   readonly startedAt = Date.now();
 
@@ -114,6 +247,11 @@ export class Troupe {
       },
       off: (roleId, stageName) => this.off(roleId, stageName),
       cueList: () => (this.cueScheduler ? this.cueScheduler.list() : Promise.resolve([])),
+      traces: (n, filter) => this.traces(n, filter),
+      boothAddr: this.boothAddress(),
+      clusterAggregate: this.cluster ? () => this.cluster!.aggregateDirector() : undefined,
+      deployLocal: (bundle) => this.deployLocal(bundle as never),
+      rollbackDeploy: (roleId) => this.rollbackDeploy(roleId),
       propStore: this.propStore,
       namespace: this.namespaceValue,
       pid: process.pid,
@@ -128,6 +266,9 @@ export class Troupe {
       off: (roleId: string, stageName: string) => directorCall("off", [roleId, stageName], deps),
       cues: () => directorCall("cues", [], deps),
       ring: () => directorCall("ring", [], deps),
+      cluster: () => directorCall("cluster", [], deps),
+      deploy: (bundle: unknown) => directorCall("deploy", [bundle], deps),
+      rollback: (roleId: string) => directorCall("rollback", [roleId], deps),
     };
   }
 
@@ -249,9 +390,41 @@ export class Troupe {
     const casterRef: { current?: CastHandle } = {};
     const ownershipRef: { current?: OwnershipDeps } = {};
     const directorRef: { current?: (method: string, args: unknown[]) => Promise<unknown> } = {};
+    const troupeRef: { current?: Troupe } = {};
+    // Show 订阅 API（M6）：非集群 = 本地 broker 语义（归属恒为本 Stage）
+    const localSubs = new Map<string, Map<string, Audience>>();
+    const dedupKey = (a: Audience) => `${a.roleId}\u0000${a.stageName}\u0000${a.method}`;
+    const showApi = {
+      subscribe: async (identity: { roleId: string; stageName: string }, topic: string, method = "onEvent") => {
+        const audience: Audience = { roleId: identity.roleId, stageName: identity.stageName, method };
+        if (cluster) {
+          cluster.subscribe(topic, audience);
+          return;
+        }
+        let subs = localSubs.get(topic);
+        if (!subs) {
+          subs = new Map();
+          localSubs.set(topic, subs);
+        }
+        subs.set(dedupKey(audience), audience);
+      },
+      unsubscribe: async (identity: { roleId: string; stageName: string }, topic: string, method = "onEvent") => {
+        const audience: Audience = { roleId: identity.roleId, stageName: identity.stageName, method };
+        if (cluster) {
+          cluster.unsubscribe(topic, audience);
+          return;
+        }
+        localSubs.get(topic)?.delete(dedupKey(audience));
+      },
+    };
+    const traceBus = new TraceBus();
     const stageManager = new StageManager(
-      propStore, roles, events, metrics, config, now, casterRef, ownershipRef, cueApi,
+      propStore, roles, events, metrics, config, now, casterRef, ownershipRef, cueApi, showApi,
+      (topic, event) => troupeRef.current!.publish(topic, event),
+      traceBus,
+      opts.onSpan,
     );
+    void troupeRef; // 晚绑定：troupe 构造后回填
 
     // 本地执行包装：结果出边界（本地/远程/Rehearsal 行为一致，§6.1）
     const localRef = opts.localCallByReference ?? false;
@@ -263,7 +436,27 @@ export class Troupe {
     let cluster: Cluster | null = null;
     if (opts.cluster) {
       cluster = new Cluster(
-        { namespace: config.namespace, roles, events, localExec: execLocal, directorRef },
+        {
+          namespace: config.namespace,
+          roles,
+          events,
+          localExec: execLocal,
+          directorRef,
+          // Show 投递（M6）：经完整调用管道（Playbill 路由 → 串行 Turn）。
+          // Audience 可能在其它 Stage——必须走 route（本地执行/远程转发），
+          // 回调运行晚于 form() 完成，cluster 变量此时已就绪。
+          showDeliver: async (audience, _topic, event) => {
+            await cluster!.route({
+              callId: randomUUID(),
+              roleId: audience.roleId,
+              stageName: audience.stageName,
+              method: audience.method,
+              args: [event],
+              deadline: now() + defaultTimeoutMs,
+              hops: 0,
+            });
+          },
+        },
         opts.cluster,
       );
       await cluster.start();
@@ -311,7 +504,10 @@ export class Troupe {
     const troupe = new Troupe(
       events, metrics, roles, stageManager, now, defaultTimeoutMs, cluster, localRef,
       propStore, config.namespace, cueScheduler, cueStore !== null,
+      localSubs, traceBus,
     );
+    troupeRef.current = troupe;
+    // Actor 内 publishShow 通道（晚绑定到 troupe.publish）
     // Actor 互调句柄：form() 完成后绑定（避免构造期循环依赖）
     casterRef.current = (first, stageName) => troupe.cast(first as ActorCtor<Actor<any>>, stageName);
     // Director 通道（§11.1）：CLI / Booth / 远程管理经 cluster 边缘进入
@@ -331,12 +527,27 @@ export class Troupe {
         },
         off: (roleId, stageName) => troupe.off(roleId, stageName),
         cueList: () => (cueScheduler ? cueScheduler.list() : Promise.resolve([])),
+        traces: (n, filter) => troupe.traces(n, filter),
+        boothAddr: troupe.boothAddress(),
+        clusterAggregate: cluster ? () => cluster.aggregateDirector() : undefined,
+        deployLocal: (bundle) => troupe.deployLocal(bundle as never),
+        rollbackDeploy: (roleId) => troupe.rollbackDeploy(roleId),
         propStore,
         namespace: config.namespace,
         pid: process.pid,
         startedAt: troupe.startedAt,
       });
 
+    if (opts.boxoffice) {
+      const bo = opts.boxoffice === true ? {} : opts.boxoffice;
+      const { BoxOffice } = await import("./boxoffice/boxoffice.js");
+      const boxoffice = new BoxOffice(troupe, bo.token);
+      const addr = await boxoffice.start({ host: bo.host, port: bo.port });
+      troupe.attachBoxOffice(boxoffice);
+      console.log(
+        `[troupe] BoxOffice 网关：${addr}（WS /ws；${boxoffice.ticket ? "ticket 已启用" : "无鉴权——仅限 loopback 开发"}）`,
+      );
+    }
     if (opts.booth) {
       const boothOpts = opts.booth === true ? {} : opts.booth;
       const booth = new Booth(troupe);
@@ -348,6 +559,22 @@ export class Troupe {
   }
 
   private booth: Booth | null = null;
+  private boxoffice: { stop(): void; address: string | null; ticket: string | null } | null = null;
+
+  /** @internal BoxOffice 启动后回填 */
+  attachBoxOffice(bo: { stop(): void; address: string | null; ticket: string | null }): void {
+    this.boxoffice = bo;
+  }
+
+  /** BoxOffice 网关地址（未启用为 null） */
+  boxofficeAddress(): string | null {
+    return this.boxoffice?.address ?? null;
+  }
+
+  /** BoxOffice ticket（未启用鉴权为 null） */
+  boxofficeTicket(): string | null {
+    return this.boxoffice?.ticket ?? null;
+  }
 
   /** @internal Booth 启动后回填（form 内部使用） */
   attachBooth(booth: Booth): void {
@@ -373,6 +600,65 @@ export class Troupe {
   /** 组团后的角色清单（报错与调试用） */
   repertoire(): string[] {
     return [...this.roleMap.keys()];
+  }
+
+  /**
+   * 热重载一个 Actor 类（M10，DESIGN §9.3）：注册表换新版本（codeVersion+1），
+   * 按策略处理在场实例。swap 强制守则静态检查（需要 source）。
+   */
+  async reloadActorClass(
+    ctor: Function,
+    opts: {
+      policy?: ReloadPolicy | ((roleId: string) => ReloadPolicy);
+      source?: string;
+    } = {},
+  ): Promise<{ roleId: string; policy: ReloadPolicy; fromVersion: number; toVersion: number; affected: number }> {
+    const probe = describeRole(ctor, { intermissionMs: 5 * 60_000 });
+    const roleId = probe.meta.roleId;
+    const existing = this.roleMap.get(roleId);
+    if (!existing) {
+      throw new UnknownRoleError(
+        `reload 失败：角色 "${roleId}" 未注册（首次注册请走 form({ actors }) 或 @Performs）`,
+      );
+    }
+    const policy: ReloadPolicy =
+      typeof opts.policy === "function" ? opts.policy(roleId) : (opts.policy ?? "recycle");
+    if (policy === "swap") {
+      if (!opts.source) {
+        throw new SwapViolationError("swap 需要提供 source 做守则静态检查（DESIGN §9.5）", [
+          "未提供源码文本",
+        ]);
+      }
+      const violations = scanActorSource(opts.source);
+      if (violations.length > 0) {
+        throw new SwapViolationError(
+          `swap 被拒绝：源码违反 ${violations.length} 条守则（DESIGN §9.5）`,
+          violations,
+        );
+      }
+    }
+    const newMeta = {
+      ...probe.meta,
+      roleId,
+      intermissionMs: existing.intermissionMs, // 换码不改生命周期配置
+      codeVersion: existing.codeVersion + 1,
+    };
+    this.roleMap.set(roleId, newMeta);
+    let applied: { swapped: number; recycled: number; kept: number };
+    try {
+      applied = await this.stageManager.applyVersion(roleId, newMeta, policy, existing.codeVersion);
+    } catch (e) {
+      // swap 失败（如 onCodeSwap 抛错）：roleMap 与原型一并回滚（§9.5#7）
+      this.roleMap.set(roleId, existing);
+      throw e;
+    }
+    return {
+      roleId,
+      policy,
+      fromVersion: existing.codeVersion,
+      toVersion: newMeta.codeVersion,
+      affected: applied.swapped + applied.recycled,
+    };
   }
 
   /** 集群地址（未启用集群为 null） */
@@ -425,6 +711,9 @@ export class Troupe {
           args: this.localRef ? rawArgs : codecCopy(rawArgs),
           deadline: now() + timeoutMs,
           hops: 0,
+          // 调用链追踪（§11.4）：Turn 内 this.cast 自动携带父 span；
+          // Edge/顶层调用无 ALS 上下文 → StageManager 生成新 trace
+          traceparent: callAls.getStore()?.traceparent ?? newSpan().traceparent,
         };
         return cluster
           ? cluster.route(env)
@@ -458,6 +747,7 @@ export class Troupe {
     await this.stageManager.drainAll();
     this.cluster?.closeClients();
     this.booth?.stop();
+    this.boxoffice?.stop();
   }
 
   /** 硬杀模拟（kill -9）：无 leave、无排空——仅测试/混沌用 */
@@ -466,6 +756,7 @@ export class Troupe {
     this.cluster?.destroy();
     this.stageManager.close();
     this.booth?.stop();
+    this.boxoffice?.stop();
   }
 
   /** 测试/运维：在场 Actor 快照（状态机观测） */
@@ -477,8 +768,9 @@ export class Troupe {
     for (const [roleId, meta] of this.roleMap) {
       if (meta.ctor === ctor) return roleId;
     }
-    // 未注册的类引用：解析出目标 roleId 以给出准确报错
+    // 热重载后旧类引用（dev 场景 import 不变）：按解析出的 roleId 查注册表
     const { meta } = describeRole(ctor, { intermissionMs: 0 });
+    if (this.roleMap.has(meta.roleId)) return meta.roleId;
     throw new UnknownRoleError(
       `cast 失败：${meta.roleId} 未注册（显式传入 form({ actors: [...] })，或 import 其模块使 @Performs 生效）`,
     );

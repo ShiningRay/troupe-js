@@ -17,7 +17,7 @@ Troupe.js 是一个面向 Node.js/TypeScript 的 **Virtual Actor** 框架，思�
 - **按需激活**：第一条 Call 到达时，由运行时在集群某 Stage 上激活（OnStage）；生产集群中激活前置所有权检查（§6.5）
 - **自动钝化**：空闲超过 Intermission 后自动下场（OffStage），Props 归还 PropStore
 - **位置透明**：调用方持有 Agent（代理），不关心目标在哪个 Stage
-- **Turn-based 并发**：每个在场 Actor 一次只处理一条 Call，天然无锁——与 Node 事件循环天然契合。**严格串行是唯一执行模式**；交错执行（`@Improv`/`@ReadOnly`）是后续独立阶段（§5.4）
+- **Turn-based 并发**：默认严格串行（一次一条 Call，天然无锁）；标注 `@Improv`/`@ReadOnly` 的方法按组合矩阵交错执行（§5.4），与 Node 事件循环天然契合
 - **故障即重激活**：Stage 死亡后，下一条 Call 会让 Actor 在健康 Stage 重新登台，Props 从 PropStore 恢复（生产集群须先获得所有权，§6.5）
 
 ### 1.3 设计原则
@@ -115,8 +115,8 @@ export class CartActor extends Actor<CartProps> {
 | 修饰 | 语义 |
 |---|---|
 | `@Extra({ perStage: 4 })` | 群众演员：每 Stage 池化多实例、无固定身份，用于扇出计算 |
-| `@Improv` | 可重入：`await` 点允许下一条 Call 插入。语义与交付阶段见 §5.4——M1 起标注了也按严格串行执行并告警 |
-| `@ReadOnly` | 只读方法（不改 Props），可与其它读操作交错（§5.4） |
+| `@Improv` | 可重入：`await` 点允许与任意标注方法交错（§5.4 组合矩阵，M5 交付） |
+| `@ReadOnly` | 只读方法（不改 Props），可与其它标注方法交错（§5.4） |
 | `@Intermission("10m")` | 空闲超时自动下场 |
 
 ### 3.2 组团与选角
@@ -264,10 +264,12 @@ StageManager 把 Call 投入该 Actor 的 CallBoard（FIFO）
 
 - 所有 Call 带 deadline（默认 30s，可按方法覆盖），跨 Stage 传播；语义见 §5.1（排队过期不执行；执行中过期不放行）
 - 环状等待靠超时打破；文档引导拆分调用或使用交错（见下）
-- **交错执行（`@Improv`/`@ReadOnly`）为后续独立阶段（PLAN M5）**：M1 起标注了这两个装饰器的方法一律按严格串行执行并输出告警。语义预定义：
-  - **允许组合**：`@ReadOnly`×`@ReadOnly` 可交错；`@Improv` 可在 await 点与任意标注方法交错；未标注方法与任何调用不交错
-  - **写饥饿防护**：写调用入队后，新到的 `@ReadOnly` 排到其后（读占比上限可配）
-  - JS 单线程**不提供**跨 await 的业务原子性：交错窗口内其它调用可见 Props 中间态，文档必须明示
+- **交错执行（M5 已交付）**：调度器按方法类别启动判定——
+  - **类别**：未标注 = strict（独占）；`@Improv`/`@ReadOnly` = annotated
+  - **组合矩阵**：strict 仅在飞为 0 时启动；annotated 可与在飞 annotated 交错（`@ReadOnly`×`@ReadOnly`、`@Improv`×任意标注）；未标注与任何调用不交错
+  - **写饥饿防护**：strict 入队后停止启动新 annotated Turn（strict 等待有界 = 在飞请求时长）；strict 启动仍按 FIFO
+  - **quiesce 语义**：排空等待全部在飞 Turn 与排队调用（交错开启时含所有并发请求），不中断在飞
+  - ⚠ JS 单线程**不提供**跨 await 的业务原子性：交错窗口内其它调用可见 Props 中间态（如"扣减已见、审计未写"），标注前必须确认方法容忍中间态
 
 ---
 
@@ -734,7 +736,7 @@ project/
 
 - 不做代码生成（Proxy + 类型推导已够）
 - 不做目录式 Playbill 与任意 Casting（二期）
-- **交错执行（`@Improv`/`@ReadOnly`）不在一期运行时交付**：M1 起严格串行，交错为后续独立阶段（PLAN M5）
+- **交错执行已交付（M5）**：`@Improv`/`@ReadOnly` 按 §5.4 组合矩阵交错；未标注方法语义不变（独占）
 - **无协调服务集群定位为实验性**：允许重复激活，不承诺强一致业务语义；生产强一致需共享 PropStore 所有权（§6.5）
 - 不做 BoxOffice 客户端网关、Show 流、Audience 观察者（后续里程碑）
 - 不做多语言（JSON 协议保留了可能性）

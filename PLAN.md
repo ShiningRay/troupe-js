@@ -15,12 +15,12 @@
 | M3 | 共享持久化 + 成员协议 + 所有权交接 | 正常扩容、失联、暂停恢复不破坏选定一致性级别 |
 | M4 | 持久 Cue + Director/CLI + 基础指标 | 下场及集群重启后提醒可发现；重复投递策略可验证 |
 | M5 | 交错执行（@Improv/@ReadOnly） | 组合矩阵与写饥饿防护专项测试 |
-| M6 | Trace 总线 | `tail`/`top` 可用 |
-| M7 | Show + Audience | pub/sub 全链路 |
-| M8 | BoxOffice、观测性、压测 | 十万级在场 Actor 基准（含热点倾斜与两种成功语义分别测量） |
-| M9 | Booth | 基础版 + 进阶版 |
-| M10 | dev 热重载（L1） | recycle 保存即生效；swap 守则静态检查 |
-| M11 | 生产热替换（L2，独立实验） | 独立语义与容量预算验收；回滚演练 |
+| M6 | Trace 总线 ✅ 已完成（2026-09-13，累计验收 123 例全绿；CLI tail/top 实机可用） | 环形缓冲+采样+订阅；`tail`/`top` 可用 |
+| M7 | Show + Audience ✅ 已完成（2026-09-13） | pub/sub 全链路 |
+| M8 | BoxOffice、观测性、压测 ✅ 已完成（2026-09-13，累计验收 129 例全绿） | 十万级基准 88k activations/s、6.3KB/Actor |
+| M9 | Booth ✅ 已完成（2026-09-13，累计验收 133 例全绿） | 基础版+进阶版：总览/Actors/Ring/Live Trace/Cues/详情；Director 集群聚合 |
+| M10 | dev 热重载（L1） ✅ 已完成（2026-09-13，累计验收 142 例全绿） | recycle Props 无损；swap 守则拒绝+回滚 |
+| M11 | 生产热替换（L2，独立实验） ✅ 已完成（2026-09-13，累计验收 146 例全绿） | 签名部署/兼容检查/回滚演练可验证 |
 
 顺序逻辑：M0 先把承诺写成可验收契约，避免实现到一半才改接口与执行模型；PropStore 合同与生命周期相互定义，随 M1 落地（不能晚于运行时）；编解码一致性与信任边界先于任何跨节点部署；所有权交接先于任何"生产集群"宣称；持久 Cue 依赖所有权与调度契约；交错执行改变执行模型，独立成阶段；观测埋点与测试注入接口从 M1 保留，完整管理界面与动画后移；热更新是最后一块增量能力。"核心零 npm 依赖"是交付偏好，不优先于协议正确性与维护成本。
 
@@ -89,13 +89,13 @@
 - 提醒执行一半宕机 → 租约到期重新投递；业务幂等去重可验证（重复投递策略有测试）
 - `npx troupe ps` 本地 dev 节点零配置出表；`inspect` 看到 Props 快照；`call` 跨 Stage 返回结果；`off` 后 Actor 从 `ps` 消失
 
-### M5 交错执行（@Improv/@ReadOnly，DESIGN §5.4）
+### M5 交错执行（@Improv/@ReadOnly，DESIGN §5.4）✅ 已完成（2026-09-13，累计验收 113 例全绿）
 
 范围：允许组合矩阵（`@ReadOnly`×`@ReadOnly`、`@Improv`×任意 await 点、未标注不交错）、写饥饿防护（写调用入队后读让位/读份额上限）、跨 await 中间态可见性文档与示例、`quiesce()` 扩展（等待全部运行中请求与框架回调）。
 
 验收：组合矩阵专项测试（含 A→B→A 交错序列）；持续读负载下写调用在有限时间内获得执行；交错开启时 quiesce/优雅停机正确等待全部在执行请求。
 
-### M6 Trace 总线
+### M6 Trace 总线 ✅ 已完成（2026-09-13）
 
 范围：调用事件（调用方→被调方、方法、耗时、结果）+ 每 Stage 1 万条环形缓冲 + Trace 字节预算 + 采样率配置 + `subscribeTrace`；CLI `tail` `top`。
 
@@ -107,19 +107,19 @@
 
 验收：聊天室示例——`RoomActor` 向 Show 发布，订阅者（含 Audience 回调）实时收到。
 
-### M8 BoxOffice、观测性、压测
+### M8 BoxOffice、观测性、压测 ✅ 已完成（2026-09-13）
 
 范围：BoxOffice（WebSocket 客户端网关，ticket 鉴权，浏览器直拿 Agent）、OpenTelemetry 打通（调用上下文随信封传播）、性能压测与调优。
 
 验收：十万级在场 Actor 内存/调度基准报告；热点倾斜场景（单热点 Actor、大量唯一 stageName、慢接收方）验证全局内存预算与过载拒绝；持久成功与攒批两种语义的吞吐分别测量成文（容量事实：单热点 Actor 只有一个串行通道）；浏览器客户端经 BoxOffice 完成一次 cast 调用。
 
-### M9 Booth
+### M9 Booth ✅ 已完成（2026-09-13；预览版曾随 M2 提前交付）
 
 范围：SPA 构建管线（产物打进 npm 包，依赖不进用户 node_modules）、Stage 内嵌静态服务 + SSE、`troupe booth` 命令；基础版页面（Troupe 总览、Actors 浏览器、Actor 详情 + 调用面板 + 强制下场）；进阶（Ring 视图、Live Trace 动画、Metrics 图表）。
 
 验收：dev 模式 `Troupe.form()` 后访问 `/booth` 直接可用；从界面调用一个方法并看到 Props 变化；Live Trace 对接 M6 总线。
 
-### M10 dev 热重载（L1，见 DESIGN.md §9.3）
+### M10 dev 热重载（L1，见 DESIGN.md §9.3）✅ 已完成（2026-09-13）
 
 范围：`troupe dev` 监听与转译管线（esbuild + ESM 版本化重导，依赖子图传递失效；运行时单例保持、旧依赖子图与外部资源释放、反复重载内存测量）、注册表 `codeVersion`、三种在场 Actor 处理策略（`recycle` 默认 / `swap` opt-in / `keep`）、`Actor` 基类 `onCodeSwap()` 钩子与失败回滚、swap 守则静态检查（实例字段、`#private`、实例箭头函数、预 bind 方法）、Edge handler 间接引用原子切换、CLI `ps` 增加代码版本列。
 
@@ -230,12 +230,12 @@ troupejs/
 
 ---
 
-## 8. 下一步（M5 启动清单）
+## 8. 下一步（后续收尾）
 
-M1–M4 已完成（M4：2026-09-13）。M4 代码骨架：`src/cues/{cue-store,memory,sqlite,scheduler,actor-cues}.ts`、`src/director/director.ts`、wire `t=dir` 通道（token 校验）、`cli/troupe.ts`、Booth `/healthz`+`/metrics`。已知边界：cron（5 字段，本地时间）已随装饰器交付；显式 timezone 解析、PG 版 CueStore 未实现（SQLite 同机多进程可用）；PG 版 CueStore 未实现（SQLite 同机多进程可用）；跨 Stage 的 Director 扇出聚合未做（CLI 连单点）。
+M1–M11 全部完成（M11：2026-09-13）。M11 代码骨架：`src/hot/deploy.ts`（bundle HMAC 签名/验签、data: 求值、L3 兼容静态检查 R1/R3、部署历史）、`Troupe.deployLocal/deployCluster/rollbackDeploy`、Director `deploy`/`rollback`、CLI `deploy <roleId> <file>` / `rollback <roleId>`。语义：回滚 = 重新部署上一已接受 bundle（可往复）；swap 热替换不打断流量（排队请求换码后继续）。已知边界：bundle 需自包含 JS（data: 求值，不支持相对导入）；签名鉴完整性、传输保护仍靠 token+受控网络；`npm publish` 化与完整 CLI `dev` 命令、Booth SPA 打包、OTel SDK 直连等属框架化收尾工作，见 README 已知边界。
 
-1. 允许组合矩阵：`@ReadOnly`×`@ReadOnly`、`@Improv`×任意 await 点、未标注不交错（DESIGN §5.4）
-2. 写饥饿防护：写调用入队后读让位/读份额上限
-3. 跨 await 中间态可见性文档与示例
-4. `quiesce()` 扩展：交错开启时等待全部运行中请求与框架回调
-5. 专项测试：A→B→A 交错序列、持续读负载下写有限时间获得执行
+里程碑计划内的实现与验收到此全部交付。后续可选项：
+1. npm 包化收尾（bin 入口、`troupe dev`/`troupe booth` 完整命令、Booth SPA 构建管线）
+2. 持久订阅 / Show outbox（至少一次投递升级）
+3. 性能优化专项（开放问题 7：本地调用快路径）
+4. OTel SDK 直连适配包

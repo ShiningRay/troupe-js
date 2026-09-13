@@ -21,4 +21,9 @@ export class Playbill {
   ownerOf(roleId: string, stageName: string): string | null {
     return this.ring.get(`${this.namespace}:${roleId}:${stageName}`);
   }
+
+  /** 任意原始键的归属（Show 话题等：`show:<topic>`） */
+  ownerOfKey(rawKey: string): string | null {
+    return this.ring.get(`${this.namespace}:${rawKey}`);
+  }
 }

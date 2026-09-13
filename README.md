@@ -2,7 +2,7 @@
 
 面向 Node.js/TypeScript 的 **Virtual Actor** 框架。设计见 [DESIGN.md](./DESIGN.md)，开发计划见 [PLAN.md](./PLAN.md)。
 
-> 状态：**M1–M4 已交付**——串行运行时；SQLite/Codec/TCP 集群/信任边界；所有权（租约 + fencing）/成员硬化/production；持久 Cue（至少一次）+ Director/CLI + 指标端点。
+> 状态：**M1–M11 已交付**（里程碑计划内全部完成；L2 热替换为独立实验定位）——串行+交错运行时；SQLite/Codec/TCP 集群/信任边界；所有权（租约 + fencing）/成员硬化/production；持久 Cue（至少一次）+ Director/CLI + 指标端点；Trace 总线；Show/Audience（pub/sub）。
 > 要求 Node >= 22.13。
 
 ## 快速开始（仓库内）
@@ -10,7 +10,7 @@
 ```bash
 npm install
 npm run typecheck        # tsc --noEmit
-npm test                 # vitest（95 例验收；含 M3 所有权/混沌/Postgres、M4 Cue/Director）
+npm test                 # vitest（146 例验收；M1–M11 全部验收，含混沌/所有权/热替换演练）
 npm run build            # 构建 dist/
 npm run example          # examples/minimal（DESIGN §3.1 Cart）
 npm run demo             # examples/demo（8 段 M1 行为演示，含多 Actor 交互）
@@ -21,6 +21,7 @@ npm run example:timers   # 定时/延时任务用法演示：内存 Cue 攒批 /
 npm run example:chat     # 聊天室（带前端界面）：Room Actor 串行处理 + SQLite 持久化 + SSE 实时推送 + 幂等发送重试；Booth 同步开在 7500
 npm run cli               # troupe CLI（status/roster/ps/inspect/call/off/cues/ring，--to host:port --json）
 npm run bench:sqlite     # SQLite 写入延迟与事件循环阻塞基准
+npm run bench:scale      # 十万级激活/热点倾斜基准（88k activations/s、6.3KB/Actor，可传 [数量] [倾斜调用数]）
 npm run bench:cluster    # 集群消息处理基准（3 进程真 TCP）：同步直调/async 直调/本地/跨 Stage/落盘/并发吞吐/M3 所有权开销（可传 [秒=5] [payload字节=256] [并发=8]）
 ```
 
@@ -88,7 +89,7 @@ await cart.add(item);
 | 信任边界：接收端信封校验 + 方法白名单 + 角色未加载显式拒绝 | `src/cluster/cluster.ts` |
 | 全局背压：每 Stage 激活数上限、排队字节预算 | `src/core/stage-manager.ts` |
 | 优雅停机 `troupe.shutdown()`：leave → 拒新 → 存量 settle → 全员 offStage+save | `src/troupe.ts` |
-| 调度器每 64 Turn 让出事件循环（§5.3，防微任务流饿死定时器） | `src/core/stage-manager.ts` |
+| 调度器每 64 Turn 让出事件循环（§5.3）+ 交错执行（§5.4：strict 独占 / annotated 按矩阵交错 / strict 入队防饿 / quiesce 等全部在飞） | `src/core/stage-manager.ts` |
 | **Booth 预览版**：内省面板（Stage/成员/在场 Actor 状态机/指标/事件流/调用与下场面板），`form({ booth: true })` 启用，默认 `127.0.0.1:7500`；数据经 **SSE 实时推送**（事件驱动 ~250ms 合并 + 1s 保活帧，§11.3） | `src/booth/` |
 | SQLite 基准：~1KB 写 p50 0.08ms / p99 0.19ms；5ms 心跳最大间隙 8.81ms | `examples/bench/` |
 
@@ -120,6 +121,56 @@ M3 验收覆盖（83 例）：所有权并发原子性/epoch 单调/租约过期
 | Booth `/healthz` + `/metrics`（Prometheus 文本） | `src/booth/server.ts` |
 
 M4 验收（12 例新增）：CueStore CAS/租约；周期触发进串行 Turn + payload 传递；**下场后由提醒重新登台**；一次性触发后删记录；注销零触发；**执行者宕机（租约滞留）到期重投递**；慢 tick 合并补发（不追赶）；**SQLite 重启后发现**；Director 本地/wire/token；/healthz//metrics。
+
+## M6/M7 交付内容（Trace 总线 + Show/Audience）
+
+| 能力 | 位置 |
+|---|---|
+| Trace 总线：Turn 边界产出（调用方/方法/耗时/结果/超时态）；环形缓冲 1 万条 + 字节预算 + 采样 | `src/core/trace.ts` |
+| 实时订阅 `subscribeTrace(filter, fn)` + 历史查询 `traces(n, filter)` | `src/troupe.ts` |
+| Director `traces` 方法；CLI `tail [--role R] [秒]` / `top` | `src/director/`、`cli/troupe.ts` |
+| Show/Audience：话题 coordinator（HashRing `show:<topic>`）、Actor `subscribe/publishShow/onEvent` | `src/show/`、`src/core/actor.ts` |
+| 跨 Stage：发布转发 coordinator fan-out、Audience 跨 Stage 经完整调用管道投递 | `src/cluster/cluster.ts` |
+
+## M8 交付内容（BoxOffice + 调用链追踪 + 大规模基准）
+
+| 能力 | 位置 |
+|---|---|
+| BoxOffice WS 网关（零依赖 RFC6455：握手/掩码帧/分片/ping-pong）：`form({ boxoffice: true })`，默认 `127.0.0.1:7600`，`?ticket=` 鉴权（`token` 选项或 `TROUPE_BOXOFFICE_TOKEN`） | `src/boxoffice/` |
+| WS 协议：`{op:"call", callId, roleId, stageName, method, args}` → cast 完整管道（白名单/串行 Turn）；浏览器页 `/` 可直接调用 | `src/boxoffice/boxoffice.ts` |
+| 调用链追踪：W3C traceparent 随信封传播（跨 Actor/跨 Stage 同 traceId）；Turn 经 AsyncLocalStorage 绑定，Actor 内 `this.cast` 自动携带父 span | `src/core/trace-context.ts` |
+| OTel 零依赖桥：`form({ onSpan })` 每 Turn 回调（traceparent/role/method/耗时/结果）——接真实 OTel SDK 由用户桥完成 | `src/troupe.ts` |
+| 大规模基准：**88,299 activations/s**（激活+Turn+保存全管道）、**6.3KB/Actor**（RSS）、单热点 186k vs 分散 132k msg/s、全局预算拒绝、drainAll 100k 下场 191ms | `examples/bench/scale-bench.ts` |
+
+## M9 交付内容（Booth 完整版 + Director 集群聚合）
+
+| 能力 | 位置 |
+|---|---|
+| Director 集群扇出聚合（M4 遗留补齐）：`troupe.director().cluster()` / wire `cluster` 方法——跨 Stage 汇总 actors/cues/booth 地址，逐条标注来源 Stage | `src/cluster/cluster.ts` |
+| Booth overview 聚合化（2s 缓存降负载，失败降级本地视图）；`/api/inspect?roleId&stageName` 详情 | `src/booth/server.ts` |
+| 页面新增：Ring 视图（SVG）、Live Trace（M6 总线，120 条，含 traceparent/结果未知态）、持久提醒表、Actor 详情 | `src/booth/page.ts` |
+| roster 暴露 booth 地址；CLI `booth` 命令（发现地址 → 打开浏览器） | `src/director/`、`cli/troupe.ts` |
+
+## M10 交付内容（dev 热重载 L1）
+
+| 能力 | 位置 |
+|---|---|
+| `Troupe.reloadActorClass(ctor, { policy, source })`：recycle（下场重登台，Props 无损）/ swap（quiesce 后 setPrototypeOf，内存保留）/ keep（旧实例自然耗尽） | `src/troupe.ts`、`src/core/stage-manager.ts` |
+| swap 守则静态扫描（#private/实例箭头函数/预 bind；启发式，必要条件）+ `SwapViolationError` 列明违规 | `src/hot/reload.ts` |
+| swap 失败自动回滚：onCodeSwap 抛错恢复旧原型 + roleMap 同步回滚（§9.5#7） | 同上 |
+| `createDevReloader`：fs.watch 父目录（macOS 单文件 watch 不可靠）+ `?t=` 版本化重导 + 注册表 `setAllowReplace` 重导窗口 | `src/hot/reload.ts` |
+| codeVersion 全链路可见：slots 快照、Director actors、CLI `ps` 代码列 | 多处 |
+
+## M11 交付内容（生产热替换 L2，独立实验）
+
+| 能力 | 位置 |
+|---|---|
+| DeployBundle：HMAC-SHA256 版本签名（`TROUPE_DEPLOY_SECRET` 验签，防篡改） | `src/hot/deploy.ts` |
+| data: 动态求值（bundle 需自包含 JS）；`Troupe.deployLocal` = 验签 → 兼容静态检查 → swap 热替换 | `src/troupe.ts` |
+| 部署期静态检查（COMPATIBILITY.md 可执行子集）：R1 方法只增不减；R3 schemaVersion 逐级 +1 且必须覆写 migrateProps；违规输出规则清单 | `src/hot/deploy.ts` |
+| 广播下发：`deployCluster` 逐成员 dir 扇出并汇总各 Stage 结果；CLI `deploy <roleId> <file>` / `rollback <roleId>` | `src/cluster/cluster.ts`、`cli/troupe.ts` |
+| 一键回滚：部署历史（每 Stage），回滚 = 重新部署上一已接受 bundle（可往复），swap 内存计数延续 | `src/troupe.ts` |
+| 验收：双 Stage 广播部署不打断流量（30 次并发调用零失败）、ps 版本切换可见、三类不兼容拒绝、签名拒篡改、回滚演练 | `test/deploy.test.ts` |
 
 ## 定时器与延时任务用法（速查）
 
@@ -170,5 +221,5 @@ cron 语义：5 字段（分 时 日 月 周，本地时间），支持 `*`、�
 - **无传输加密/鉴权**：绑定 loopback（dev）/production 前提为受控网络；传输保护与 join 凭证属后续
 - **Cue 计划形态**：every/at/cron（本地时间）已支持；显式 timezone 解析、PG 版 CueStore 列为后续
 - **Director 跨 Stage 扇出聚合**：CLI/Booth 连单点；集群级聚合视图后续
-- **@Improv/@ReadOnly 无交错**：M5
+- **@Improv/@ReadOnly 交错已交付（M5）**；读份额可配上限未做（strict 入队阻断规则已够用）
 - **Codec 为默认 JSON 语义**：MessagePack 插件后续

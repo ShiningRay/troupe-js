@@ -143,8 +143,8 @@ describe("M1 验收：Agent 表面（DESIGN §3.2）", () => {
   });
 });
 
-describe("M1 验收：@Improv 在 M1 按严格串行执行并告警", () => {
-  it("标注产生告警事件；执行仍是严格串行", async () => {
+describe("M5 语义：@Improv 交错交付后未标注方法仍独占", () => {
+  it("未标注方法（bump）不与 @Improv 方法交错；无 M1 告警", async () => {
     improvOrder = [];
     const warnings: string[] = [];
     const troupe = await Troupe.form({
@@ -154,12 +154,12 @@ describe("M1 验收：@Improv 在 M1 按严格串行执行并告警", () => {
         if (e.type === "warn") warnings.push(String(e.detail?.message));
       },
     });
-    expect(warnings.some((w) => w.includes("ImprovCart.slowPeek"))).toBe(true);
+    expect(warnings.some((w) => w.includes("严格串行"))).toBe(false); // M1 告警已移除
 
     const agent = troupe.cast(ImprovCartActor, "im-1");
-    const peekP = agent.slowPeek(); // 20ms
+    const peekP = agent.slowPeek(); // @Improv，20ms
     await sleep(5);
-    const bumpP = agent.bump(); // 必须等 slowPeek 完整结束
+    const bumpP = agent.bump(); // 未标注 = strict：与任何调用不交错
     await peekP;
     await bumpP;
 
