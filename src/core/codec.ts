@@ -63,8 +63,37 @@ class JsonCodec implements Codec {
 
 export const defaultJsonCodec: Codec = new JsonCodec();
 
+/**
+ * 快路径判定（性能专项，开放问题 7）：原始值与"原始值数组"对 JSON round-trip
+ * 恒等——免去 stringify/parse。语义保持：
+ * - NaN/±Infinity 不走快路径（JSON 语义归为 null，走慢路径保真）
+ * - -0 归一为 +0（JSON 语义）
+ * - 对象/嵌套结构一律走慢路径（JSON 的整数键重排使浅拷贝不等价）
+ */
+function fastPathValue(v: unknown): { ok: boolean; value: unknown } {
+  if (v === null) return { ok: true, value: null };
+  const t = typeof v;
+  if (t === "string" || t === "boolean") return { ok: true, value: v };
+  if (t === "number") {
+    if (!Number.isFinite(v as number)) return { ok: false, value: null };
+    return { ok: true, value: v === 0 ? 0 : v };
+  }
+  if (Array.isArray(v)) {
+    const out = new Array<unknown>(v.length);
+    for (let i = 0; i < v.length; i++) {
+      const e = fastPathValue(v[i]);
+      if (!e.ok) return { ok: false, value: null };
+      out[i] = e.value;
+    }
+    return { ok: true, value: out };
+  }
+  return { ok: false, value: null };
+}
+
 /** 经编解码边界的深拷贝（本地调用/Props 进出边界统一走这里） */
 export function codecCopy<T>(value: T): T {
+  const fast = fastPathValue(value);
+  if (fast.ok) return fast.value as T; // 快路径：与 JSON round-trip 恒等（§6.1 语义不变）
   const text = defaultJsonCodec.encode(value);
   if (text === undefined) return undefined as T;
   return defaultJsonCodec.decode(text) as T;

@@ -7,6 +7,9 @@
   "engines": {
     "node": ">=22.13"
   },
+  "bin": {
+    "troupe": "./dist/cli/troupe.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -34,7 +37,7 @@
     "bench:sqlite": "tsx examples/bench/sqlite-bench.ts",
     "bench:cluster": "tsx examples/bench/cluster-bench.ts",
     "bench:scale": "tsx examples/bench/scale-bench.ts",
-    "cli": "tsx cli/troupe.ts",
+    "cli": "tsx src/cli/troupe.ts",
     "example:timers": "tsx examples/timers/main.ts"
   },
   "devDependencies": {

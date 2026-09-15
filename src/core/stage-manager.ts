@@ -162,6 +162,8 @@ export class StageManager {
     private readonly traceBus?: TraceBus,
     private readonly onSpan?: (span: {
       traceparent: string;
+      /** 父 span（调用方）的 traceparent；顶层调用为 undefined */
+      parentTraceparent?: string;
       roleId: string;
       stageName: string;
       method: string;
@@ -881,6 +883,7 @@ export class StageManager {
     });
     this.onSpan?.({
       traceparent: span.traceparent,
+      parentTraceparent: env.traceparent,
       roleId: env.roleId,
       stageName: env.stageName,
       method: env.method,

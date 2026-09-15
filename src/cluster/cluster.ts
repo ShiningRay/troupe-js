@@ -22,6 +22,7 @@ import { Roster } from "./roster.js";
 import { Playbill } from "./playbill.js";
 import { ShowBroker } from "../show/show.js";
 import type { Audience } from "../show/show.js";
+import type { SubscriptionStore } from "../show/subscription-store.js";
 
 export interface ClusterOptions {
   /** 绑定地址，dev 默认 127.0.0.1（§8.2；开放监听属生产模式，M3） */
@@ -66,12 +67,15 @@ export class Cluster {
       directorRef?: { current?: (method: string, args: unknown[]) => Promise<unknown> };
       /** Show 通道（M6）：deliver 由 Troupe.form 晚绑定注入（经完整调用管道） */
       showDeliver?: (audience: Audience, topic: string, event: unknown) => Promise<void>;
+      /** Show 订阅持久化（M11+ 收尾）：coordinator 重启后重载订阅 */
+      showStore?: SubscriptionStore;
     },
     private readonly opts: ClusterOptions = {},
   ) {
     this.playbill = new Playbill(deps.namespace, []);
     this.broker = new ShowBroker({
       namespace: deps.namespace,
+      subscriptionStore: deps.showStore,
       isShowOwner: (t) => this.showOwnerOf(t) === this.selfAddr,
       forward: (topic, kind, audience, event) => {
         const owner = this.showOwnerOf(topic);
@@ -126,6 +130,8 @@ export class Cluster {
     this.roster.strictJoinFlag = production;
     this.roster.onMembersChanged = (alive) => {
       this.playbill.setMembers(alive);
+      // 成员视图变更 → 按新归属重放持久化订阅（M11+：coordinator 漂移接管）
+      void this.broker.reloadOwned().catch(() => {});
       this.deps.events.emit({
         type: "membershipChanged",
         roleId: "<cluster>",
@@ -135,6 +141,7 @@ export class Cluster {
     };
     this.playbill.setMembers([this.selfAddr]);
     await this.roster.start(this.opts.seeds ?? seedsFromEnv(), production);
+    await this.broker.reloadOwned().catch(() => {}); // 重启后重载持久化订阅
     this.deps.events.emit({
       type: "clusterStarted",
       roleId: "<cluster>",
@@ -166,20 +173,20 @@ export class Cluster {
     return this.playbill.ownerOfKey(`show:${topic}`);
   }
 
-  subscribe(topic: string, audience: Audience): void {
+  async subscribe(topic: string, audience: Audience): Promise<void> {
     const owner = this.showOwnerOf(topic);
-    if (!owner || owner === this.selfAddr) this.broker.subscribe(topic, audience);
+    if (!owner || owner === this.selfAddr) await this.broker.subscribe(topic, audience);
     else
-      void this.transport
+      await this.transport
         .send(owner, { t: "sub", from: this.selfAddr, topic, audience })
         .catch(() => {});
   }
 
-  unsubscribe(topic: string, audience: Audience): void {
+  async unsubscribe(topic: string, audience: Audience): Promise<void> {
     const owner = this.showOwnerOf(topic);
-    if (!owner || owner === this.selfAddr) this.broker.unsubscribe(topic, audience);
+    if (!owner || owner === this.selfAddr) await this.broker.unsubscribe(topic, audience);
     else
-      void this.transport
+      await this.transport
         .send(owner, { t: "unsub", from: this.selfAddr, topic, audience })
         .catch(() => {});
   }
@@ -369,8 +376,8 @@ export class Cluster {
         return;
       }
       if (msg.audience) {
-        if (msg.t === "sub") this.broker.subscribe(msg.topic, msg.audience);
-        else this.broker.unsubscribe(msg.topic, msg.audience);
+        if (msg.t === "sub") await this.broker.subscribe(msg.topic, msg.audience);
+        else await this.broker.unsubscribe(msg.topic, msg.audience);
       }
       reply({ t: "res", callId, ok: true, result: null });
     } catch (e) {

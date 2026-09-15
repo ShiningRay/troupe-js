@@ -2,7 +2,7 @@
 
 面向 Node.js/TypeScript 的 **Virtual Actor** 框架。设计见 [DESIGN.md](./DESIGN.md)，开发计划见 [PLAN.md](./PLAN.md)。
 
-> 状态：**M1–M11 已交付**（里程碑计划内全部完成；L2 热替换为独立实验定位）——串行+交错运行时；SQLite/Codec/TCP 集群/信任边界；所有权（租约 + fencing）/成员硬化/production；持久 Cue（至少一次）+ Director/CLI + 指标端点；Trace 总线；Show/Audience（pub/sub）。
+> 状态：**M1–M11 已交付**（里程碑计划内全部完成；L2 热替换为独立实验定位）——串行+交错运行时；SQLite/Codec/TCP 集群/信任边界；所有权（租约 + fencing）/成员硬化/production；持久 Cue（至少一次）+ Director/CLI + 指标端点；Trace 总线；Show/Audience（持久订阅 + 至少一次投递）；BoxOffice/追踪链；dev 热重载 + 生产热替换（签名/兼容检查/回滚）。
 > 要求 Node >= 22.13。
 
 ## 快速开始（仓库内）
@@ -10,7 +10,7 @@
 ```bash
 npm install
 npm run typecheck        # tsc --noEmit
-npm test                 # vitest（146 例验收；M1–M11 全部验收，含混沌/所有权/热替换演练）
+npm test                 # vitest（150 例验收；M1–M11 全部验收 + Show 持久订阅/至少一次投递）
 npm run build            # 构建 dist/
 npm run example          # examples/minimal（DESIGN §3.1 Cart）
 npm run demo             # examples/demo（8 段 M1 行为演示，含多 Actor 交互）
@@ -19,7 +19,7 @@ npm run example:cluster  # 真·多进程集群：3 个 node 进程组团/跨进
                             # 每个 Stage 各带一个 Booth 内省面板，观察窗口会打印地址（浏览器打开即用）
 npm run example:timers   # 定时/延时任务用法演示：内存 Cue 攒批 / 持久巡检 / 订单超时 / 幂等重试 / 反例
 npm run example:chat     # 聊天室（带前端界面）：Room Actor 串行处理 + SQLite 持久化 + SSE 实时推送 + 幂等发送重试；Booth 同步开在 7500
-npm run cli               # troupe CLI（status/roster/ps/inspect/call/off/cues/ring，--to host:port --json）
+npm run cli              # troupe CLI（status/roster/ps/inspect/call/off/cues/ring/tail/top/booth/deploy/rollback/dev）
 npm run bench:sqlite     # SQLite 写入延迟与事件循环阻塞基准
 npm run bench:scale      # 十万级激活/热点倾斜基准（88k activations/s、6.3KB/Actor，可传 [数量] [倾斜调用数]）
 npm run bench:cluster    # 集群消息处理基准（3 进程真 TCP）：同步直调/async 直调/本地/跨 Stage/落盘/并发吞吐/M3 所有权开销（可传 [秒=5] [payload字节=256] [并发=8]）
@@ -212,7 +212,26 @@ cron 语义：5 字段（分 时 日 月 周，本地时间），支持 `*`、�
 | 本地 echoSave ± M3 所有权 | ~19k msg/s | 所有权开销 <0.01ms/写 |
 
 派生（每条消息的中位数差）：async/await 机制 ≈0.000ms；框架本地路径 ≈0.004ms；TCP 路由 ≈0.06ms；持久化 ≈0.03ms；**M3 所有权 ≈0.00ms**（fencing 是写语句子查询 + 摊销续租）。
+
+性能专项（开放问题 7 已交付）：Codec 快路径（原始值/原始值数组免 stringify/parse 直通，语义与 JSON round-trip 恒等）——**codecCopy 1.96M → 36.4M ops/s（18.6×）**，框架本地 P1 稳态 ~219k msg/s。
 已知特性：单进程持续 ~60k msg/s 饱和压测下成员探测可能饿出瞬时 suspect——M3 反驳机制自愈（抬升 incarnation 重入团），零错误；生产容量规划见 DESIGN §5.3。
+
+## 文档与 AI Skill
+
+| 文档 | 内容 |
+|---|---|
+| [docs/getting-started.md](./docs/getting-started.md) | 快速开始 |
+| [docs/concepts.md](./docs/concepts.md) | 执行模型/生命周期/错误语义/Codec 规则 |
+| [docs/api-reference.md](./docs/api-reference.md) | 完整 API 与选项表 |
+| [docs/patterns.md](./docs/patterns.md) | 配方（库存/超时/重试/补偿/攒批/迁移） |
+| [docs/operations.md](./docs/operations.md) | 集群/所有权/可观测/热替换/CLI |
+
+**AI 工具 Skill**：[`.agents/skills/troupe/`](./.agents/skills/troupe/)（SKILL.md + references，跨工具标准位置）——供各类 AI 编码工具加载，包含 API 速查、必守规则（每条来自真实 bug）、陷阱清单与模式配方。复制该目录到任何支持 agent skills 的工具即可。
+
+## npm 包化（M11+ 收尾）
+
+- `bin/troupe` 入口 + `dist/cli/troupe.js`（build 产物）：`troupe <cmd>` 全命令可用（含 `dev <entry.ts>` —— tsx watch 可靠重启路径；进程内策略热替换用 `createDevReloader`）
+- CLI 连接错误友好包装（不再裸崩）；`booth` 自动发现并打开浏览器
 
 ## 已知边界（后续里程碑）
 

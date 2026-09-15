@@ -50,6 +50,24 @@ describe("M2 验收：Codec 边界语义（DESIGN §6.1）", () => {
     expect(() => codecCopy(o)).toThrowError(/循环引用/);
   });
 
+  it("快路径与 JSON round-trip 语义恒等（性能专项，开放问题 7）", () => {
+    // 原始值/原始值数组：快路径直通
+    expect(codecCopy("x")).toBe("x");
+    expect(codecCopy(42)).toBe(42);
+    expect(codecCopy(true)).toBe(true);
+    expect(codecCopy(null)).toBe(null);
+    expect(codecCopy(["a", 1, true, null])).toEqual(["a", 1, true, null]);
+    // -0 归一为 +0（JSON 语义）
+    expect(Object.is(codecCopy(-0), 0)).toBe(true);
+    // NaN/±Infinity 不走快路径：JSON 语义归为 null
+    expect(codecCopy(Number.NaN)).toBe(null);
+    expect(codecCopy(Number.POSITIVE_INFINITY)).toBe(null);
+    expect(codecCopy([1, Number.NaN])).toEqual([1, null]);
+    // 对象/嵌套仍走慢路径（行为不变）
+    expect(codecCopy({ b: 1, a: 2 })).toEqual({ b: 1, a: 2 });
+    expect(() => codecCopy(1n)).toThrowError(SerializationError);
+  });
+
   it("Agent 引用不可跨界（提示传 roleId+stageName）", async () => {
     const troupe = await Troupe.form({ actors: [EchoActor], defaultIntermission: 0 });
     const agent = troupe.cast(EchoActor, "e1");

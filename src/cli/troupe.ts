@@ -6,7 +6,7 @@
  * 连接：--to 或 TROUPE_ADMIN 或默认 127.0.0.1:7300（DESIGN §11.2；手写解析保持零依赖）
  */
 import { randomUUID } from "node:crypto";
-import { Transport, type WireMessage, type WireResponse } from "../src/cluster/transport.js";
+import { Transport, type WireMessage, type WireResponse } from "../cluster/transport.js";
 
 interface CliOptions {
   to: string;
@@ -49,6 +49,11 @@ async function directorRoundtrip(
     if (res.ok) return { ok: true, result: res.result ?? null };
     const err = res.err!;
     return { ok: false, error: `${err.name}: ${err.message}` };
+  } catch (e) {
+    return {
+      ok: false,
+      error: `无法连接 ${opts.to}：${e instanceof Error ? e.message : String(e)}（确认 Stage 已启动且 --to 正确）`,
+    };
   } finally {
     client.destroy();
   }
@@ -170,6 +175,22 @@ async function main(): Promise<void> {
         if (!r.ok) return `✗ ${r.error}`;
         return JSON.stringify(r.result, null, 2);
       }
+      case "dev": {
+        // M10 收尾：troupe dev <entry.ts> —— tsx watch 可靠重启路径（进程级 recycle）；
+        // 进程内热替换（recycle/swap/keep 策略）用 createDevReloader 自行接线（DESIGN §9.3）
+        const [entry] = rest;
+        if (!entry) return "用法：dev <entry.ts>（依赖 tsx；npm i -D tsx）";
+        const { spawn } = await import("node:child_process");
+        const { resolve } = await import("node:path");
+        const entryPath = resolve(entry);
+        console.log(`[troupe dev] 监听模式启动：${entryPath}（文件变更自动重启；Ctrl+C 退出）`);
+        const child = spawn(process.execPath, ["--import", "tsx", "--watch", entryPath], {
+          cwd: process.cwd(),
+          stdio: "inherit",
+        });
+        void child;
+        return "__dev__"; // 保持进程运行直至子进程退出
+      }
       case "booth": {
         // M9：向目标 Stage 查 roster（含 booth 地址）→ 打开浏览器
         const r = await directorRoundtrip(opts, "roster", []);
@@ -188,9 +209,10 @@ async function main(): Promise<void> {
         return opts.json ? JSON.stringify(d, null, 2) : d.nodes.join("\n");
       }
       default:
-        return `未知命令 "${command}"。可用：status roster ps inspect call off cues ring tail top booth deploy rollback（--to host:port --json --token）`;
+        return `未知命令 "${command}"。可用：status roster ps inspect call off cues ring tail top booth deploy rollback dev（--to host:port --json --token）`;
     }
   })();
+  if (out === "__dev__") return; // dev 模式：子进程接管 stdio
   console.log(out);
 }
 

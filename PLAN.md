@@ -9,12 +9,12 @@
 
 | 阶段 | 内容 | 关键验收 |
 |---|---|---|
-| M0 | 语义与契约 | 每项承诺（执行/失败/持久成功/所有权/兼容）都有反例与防护对应 |
-| M1 | 严格串行运行时 + PropStore 合同 | 并发首次调用只激活一次；超时不放行旧任务；保存失败不污染后续调用 |
-| M2 | 本地持久化 + 集群基础 + 信任边界 | 本地/远程/Rehearsal 数据行为一致；畸形帧可控拒绝 |
-| M3 | 共享持久化 + 成员协议 + 所有权交接 | 正常扩容、失联、暂停恢复不破坏选定一致性级别 |
-| M4 | 持久 Cue + Director/CLI + 基础指标 | 下场及集群重启后提醒可发现；重复投递策略可验证 |
-| M5 | 交错执行（@Improv/@ReadOnly） | 组合矩阵与写饥饿防护专项测试 |
+| M0 | 语义与契约 ✅ 已完成（2026-09-12） | 每项承诺（执行/失败/持久成功/所有权/兼容）都有反例与防护对应 |
+| M1 | 严格串行运行时 + PropStore 合同 ✅ 已完成（2026-09-12） | 并发首次调用只激活一次；超时不放行旧任务；保存失败不污染后续调用 |
+| M2 | 本地持久化 + 集群基础 + 信任边界 ✅ 已完成（2026-09-12） | 本地/远程/Rehearsal 数据行为一致；畸形帧可控拒绝 |
+| M3 | 共享持久化 + 成员协议 + 所有权交接 ✅ 已完成（2026-09-12） | 正常扩容、失联、暂停恢复不破坏选定一致性级别 |
+| M4 | 持久 Cue + Director/CLI + 基础指标 ✅ 已完成（2026-09-13） | 下场及集群重启后提醒可发现；重复投递策略可验证 |
+| M5 | 交错执行（@Improv/@ReadOnly） ✅ 已完成（2026-09-13，累计验收 113 例全绿） | 组合矩阵与写饥饿防护专项测试 |
 | M6 | Trace 总线 ✅ 已完成（2026-09-13，累计验收 123 例全绿；CLI tail/top 实机可用） | 环形缓冲+采样+订阅；`tail`/`top` 可用 |
 | M7 | Show + Audience ✅ 已完成（2026-09-13） | pub/sub 全链路 |
 | M8 | BoxOffice、观测性、压测 ✅ 已完成（2026-09-13，累计验收 129 例全绿） | 十万级基准 88k activations/s、6.3KB/Actor |
@@ -101,7 +101,7 @@
 
 验收：双 Stage 场景 `troupe tail --role Inventory` 实时流出跨节点调用事件；Trace 预算超限时自动降采样，不 OOM。
 
-### M7 Show + Audience
+### M7 Show + Audience ✅ 已完成（2026-09-13；持久订阅与至少一次投递随收尾清单升级交付）
 
 范围：Show（虚拟流：publish/subscribe，隐式订阅管理，首实现进程内 + TCP 转发）、Audience（客户端回调引用）。底层可插拔（NATS JetStream/Redis Streams 后续）。
 
@@ -221,12 +221,12 @@ troupejs/
 ## 7. 开放问题
 
 1. ~~**Agent 命名**~~ ✅ 已定（2026-09-12，M1 动工时）：保留 `Agent`——与 DESIGN §2 词典一致，`ActorRef` 备选废弃
-2. **CLI 实现**：commander 等库 vs 手写参数解析（命令不多，倾向手写保持零依赖）
-3. **Booth 前端栈**：构建期自由（倾向 Vite + React），产物体积预算需定（M9 前）
-4. **远程 Call 自动重试**：一期不自动重试（结果未知语义，DESIGN §6.5）；是否在 Agent 上加显式 `retry` 选项（幂等方法标注后）？M7 前评估
-5. **热重载转译器**：esbuild vs swc（M10 前按转译速度与装饰器兼容实测决定）
+2. ~~**CLI 实现**~~ ✅ 已定（M4 交付）：手写参数解析，零依赖（`src/cli/troupe.ts`）
+3. ~~**Booth 前端栈**~~ ✅ 已定（M9 交付）：单文件零构建页面（覆盖总览/Ring/Live Trace/Cues/详情/调用面板全部功能）；Vite+React SPA 列为非目标（无功能增益且增加构建链）
+4. ~~**远程 Call 自动重试**~~ ✅ 已定（M7 后评估）：框架不提供自动重试——结果未知语义下自动重试有重复副作用风险；标准做法为调用方持幂等键重试（`idempotent` 去重），显式 `retry` 选项待真实需求出现再评估
+5. ~~**热重载转译器**~~ ✅ 已定（M10 交付）：采用 tsx（esbuild 内核）——`--import tsx` loader 与 `troupe dev`（tsx watch）统一栈；swc 备选废弃
 6. ~~**外部副作用的 fencing 保护**~~ ✅ 已定（随 DESIGN v2 §6.5）：双轨指导——接收方校验 fencing token，或持久化 outbox + 业务幂等；细化示例随 M3 交付
-7. **本地调用性能优化（后续课题，暂不实施）**：基准显示框架本地路径 ≈4μs/条（vs 直调 async ≈0.09μs，见 README 基准表）——候选方向：Codec 快路径（同一序列化上下文复用）、免超时竞速定时器（仅在需要时创建）、入队零拷贝、Turn 结果直通。作为 M8 压测调优阶段的主议题，接口不得为性能破坏 §6.1 边界语义
+7. ~~**本地调用性能优化**~~ ✅ 已完成（2026-09-13，性能专项交付）：Codec 快路径——原始值/原始值数组对 JSON round-trip 恒等，免 stringify/parse 直通（**codecCopy 1.96M → 36.4M ops/s，18.6×**；框架本地 P1 稳态 219k msg/s）；语义等价有专项测试（-0 归一、NaN/Inf 走慢路径、bigint 仍抛错、对象键序同 JSON）。其余候选（免定时器竞速/入队零拷贝/Turn 直通）评估后 ROI 不足，列为后续按需
 
 ---
 
@@ -234,8 +234,8 @@ troupejs/
 
 M1–M11 全部完成（M11：2026-09-13）。M11 代码骨架：`src/hot/deploy.ts`（bundle HMAC 签名/验签、data: 求值、L3 兼容静态检查 R1/R3、部署历史）、`Troupe.deployLocal/deployCluster/rollbackDeploy`、Director `deploy`/`rollback`、CLI `deploy <roleId> <file>` / `rollback <roleId>`。语义：回滚 = 重新部署上一已接受 bundle（可往复）；swap 热替换不打断流量（排队请求换码后继续）。已知边界：bundle 需自包含 JS（data: 求值，不支持相对导入）；签名鉴完整性、传输保护仍靠 token+受控网络；`npm publish` 化与完整 CLI `dev` 命令、Booth SPA 打包、OTel SDK 直连等属框架化收尾工作，见 README 已知边界。
 
-里程碑计划内的实现与验收到此全部交付。后续可选项：
-1. npm 包化收尾（bin 入口、`troupe dev`/`troupe booth` 完整命令、Booth SPA 构建管线）
-2. 持久订阅 / Show outbox（至少一次投递升级）
-3. 性能优化专项（开放问题 7：本地调用快路径）
-4. OTel SDK 直连适配包
+里程碑计划内的实现与验收到此全部交付。后续可选项进展（2026-09-13）：
+1. ~~npm 包化收尾~~ ✅ bin 入口 + CLI 移入构建（`dist/cli/troupe.js`）+ `troupe dev`（tsx watch 路径）；Booth 维持单文件零构建方案（SPA 打包列为非目标），OTel 直连见第 4 项
+2. ~~持久订阅 / Show outbox（至少一次投递升级）~~ ✅ SubscriptionStore（SQLite）+ coordinator 重启/漂移重载 + 投递退避重试 3 次（至少一次，可能重复）
+3. ~~性能优化专项（开放问题 7：本地调用快路径）~~ ✅ Codec 快路径已交付（13–18.6× 语义恒等加速，专项测试覆盖）；其余候选 ROI 不足按需再议
+4. ~~OTel SDK 直连适配包~~ ✅ `createOtelOnSpan`（`src/otel/otel-adapter.ts`）：结构化接受任意 OTel API Tracer，span 名/属性/Link 指父 span/ERROR 状态全覆盖（框架仍零 OTel 依赖）

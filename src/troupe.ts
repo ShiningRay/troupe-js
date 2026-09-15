@@ -33,6 +33,8 @@ import { CueScheduler } from "./cues/scheduler.js";
 import type { ActorCueApi } from "./cues/actor-cues.js";
 import { directorCall, type DirectorDeps } from "./director/director.js";
 import type { Audience } from "./show/show.js";
+import { SqliteSubscriptionStore } from "./show/sqlite.js";
+import type { SubscriptionStore } from "./show/subscription-store.js";
 
 export interface TroupeOptions {
   /** 显式注册（推荐，DESIGN §3.2/§8.3）；缺省取 @Performs 进程注册表快照 */
@@ -70,9 +72,15 @@ export interface TroupeOptions {
   cues?: boolean | { store?: CueStore; tickMs?: number };
   /** BoxOffice（M8）：WebSocket 客户端网关（ticket 鉴权，浏览器直拿 Agent） */
   boxoffice?: boolean | { host?: string; port?: number; token?: string | null };
-  /** OTel 桥（M8）：每个 Turn 结束回调（W3C traceparent），桥接真实 OTel SDK 用 */
+  /**
+   * Show 持久订阅（M11+ 收尾）：订阅记录落盘（SQLite，`show:<topic>` coordinator
+   * 重启/漂移后自动重载），投递升级为至少一次（失败退避重试，订阅方幂等）。
+   */
+  show?: { persist?: boolean | { dir?: string } };
+  /** OTel 桥（M8）：每个 Turn 结束回调（W3C traceparent + 父 span），桥接真实 OTel SDK 用 */
   onSpan?: (span: {
     traceparent: string;
+    parentTraceparent?: string;
     roleId: string;
     stageName: string;
     method: string;
@@ -96,6 +104,8 @@ export function checkNodeVersion(): void {
     );
   }
 }
+
+const sleepLocal = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export class Troupe {
   private constructor(
@@ -180,32 +190,38 @@ export class Troupe {
     await Promise.allSettled(
       [...subs.values()].map(async (audience) => {
         const key = `${audience.roleId}/${audience.stageName}.${audience.method}`;
-        try {
-          await this.stageManager.call({
-            callId: randomUUID(),
-            roleId: audience.roleId,
-            stageName: audience.stageName,
-            method: audience.method,
-            args: [event],
-            deadline: this.now() + this.defaultTimeoutMs,
-            hops: 0,
-          });
-          this.events.emit({
-            type: "showDelivered",
-            roleId: "<show>",
-            method: topic,
-            at: this.now(),
-            detail: { audience: key },
-          });
-        } catch (e) {
-          this.events.emit({
-            type: "showDropped",
-            roleId: "<show>",
-            method: topic,
-            at: this.now(),
-            detail: { audience: key, error: e instanceof Error ? e.message : String(e) },
-          });
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await this.stageManager.call({
+              callId: randomUUID(),
+              roleId: audience.roleId,
+              stageName: audience.stageName,
+              method: audience.method,
+              args: [event],
+              deadline: this.now() + this.defaultTimeoutMs,
+              hops: 0,
+            });
+            this.events.emit({
+              type: "showDelivered",
+              roleId: "<show>",
+              method: topic,
+              at: this.now(),
+              detail: { audience: key, attempt },
+            });
+            return;
+          } catch (e) {
+            lastError = e;
+            if (attempt < 3) await sleepLocal(200 * attempt);
+          }
         }
+        this.events.emit({
+          type: "showDropped",
+          roleId: "<show>",
+          method: topic,
+          at: this.now(),
+          detail: { audience: key, error: lastError instanceof Error ? lastError.message : String(lastError) },
+        });
       }),
     );
   }
@@ -398,7 +414,7 @@ export class Troupe {
       subscribe: async (identity: { roleId: string; stageName: string }, topic: string, method = "onEvent") => {
         const audience: Audience = { roleId: identity.roleId, stageName: identity.stageName, method };
         if (cluster) {
-          cluster.subscribe(topic, audience);
+          await cluster.subscribe(topic, audience);
           return;
         }
         let subs = localSubs.get(topic);
@@ -407,14 +423,16 @@ export class Troupe {
           localSubs.set(topic, subs);
         }
         subs.set(dedupKey(audience), audience);
+        await showStore?.upsert({ namespace: config.namespace, topic, ...audience });
       },
       unsubscribe: async (identity: { roleId: string; stageName: string }, topic: string, method = "onEvent") => {
         const audience: Audience = { roleId: identity.roleId, stageName: identity.stageName, method };
         if (cluster) {
-          cluster.unsubscribe(topic, audience);
+          await cluster.unsubscribe(topic, audience);
           return;
         }
         localSubs.get(topic)?.delete(dedupKey(audience));
+        await showStore?.delete(topic, audience.roleId, audience.stageName, audience.method);
       },
     };
     const traceBus = new TraceBus();
@@ -433,6 +451,15 @@ export class Troupe {
       return localRef ? result : codecCopy(result);
     };
 
+    // Show 订阅持久化（M11+ 收尾）：coordinator 重启/漂移后重载
+    const showStore = opts.show?.persist
+      ? new SqliteSubscriptionStore(
+          typeof opts.show.persist === "object" && opts.show.persist.dir
+            ? opts.show.persist.dir
+            : process.env.TROUPE_SHOWS_DIR ?? "./.troupe",
+        )
+      : undefined;
+
     let cluster: Cluster | null = null;
     if (opts.cluster) {
       cluster = new Cluster(
@@ -442,6 +469,7 @@ export class Troupe {
           events,
           localExec: execLocal,
           directorRef,
+          showStore,
           // Show 投递（M6）：经完整调用管道（Playbill 路由 → 串行 Turn）。
           // Audience 可能在其它 Stage——必须走 route（本地执行/远程转发），
           // 回调运行晚于 form() 完成，cluster 变量此时已就绪。
@@ -507,6 +535,25 @@ export class Troupe {
       localSubs, traceBus,
     );
     troupeRef.current = troupe;
+    // 非集群模式：启动重载持久化订阅（集群模式由 broker.reloadOwned 在 start/成员变更时处理）
+    if (showStore) {
+      try {
+        for (const rec of await showStore.list(config.namespace)) {
+          let subs = localSubs.get(rec.topic);
+          if (!subs) {
+            subs = new Map();
+            localSubs.set(rec.topic, subs);
+          }
+          subs.set(`${rec.roleId}\u0000${rec.stageName}\u0000${rec.method}`, {
+            roleId: rec.roleId,
+            stageName: rec.stageName,
+            method: rec.method,
+          });
+        }
+      } catch (e) {
+        console.warn(`[troupe] 持久订阅重载失败（忽略）：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     // Actor 内 publishShow 通道（晚绑定到 troupe.publish）
     // Actor 互调句柄：form() 完成后绑定（避免构造期循环依赖）
     casterRef.current = (first, stageName) => troupe.cast(first as ActorCtor<Actor<any>>, stageName);
@@ -711,9 +758,9 @@ export class Troupe {
           args: this.localRef ? rawArgs : codecCopy(rawArgs),
           deadline: now() + timeoutMs,
           hops: 0,
-          // 调用链追踪（§11.4）：Turn 内 this.cast 自动携带父 span；
-          // Edge/顶层调用无 ALS 上下文 → StageManager 生成新 trace
-          traceparent: callAls.getStore()?.traceparent ?? newSpan().traceparent,
+          // 调用链追踪（§11.4）：仅当存在父上下文（Turn 内 this.cast）才传播；
+          // 顶层调用保持 undefined → StageManager 生成全新根 trace（无父 Link）
+          ...(callAls.getStore() ? { traceparent: callAls.getStore()!.traceparent } : {}),
         };
         return cluster
           ? cluster.route(env)
