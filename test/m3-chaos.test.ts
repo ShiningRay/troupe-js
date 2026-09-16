@@ -54,7 +54,8 @@ class ChaosCartActor extends Actor<{ items: string[] }> {
  * → SIGCONT 恢复旧持有者 → 其用旧 fencing token 的写入被存储拒绝。
  */
 describe("M3 混沌验收：事件循环暂停 → 接管 → 旧持有者写入被 fencing 拒绝", () => {
-  it("SIGSTOP/SIGCONT 全链路", async () => {
+  // Windows 无 SIGSTOP/SIGCONT（Node 抛 "Unknown signal"），该用例仅在 POSIX 有意义
+  it.skipIf(process.platform === "win32")("SIGSTOP/SIGCONT 全链路", async () => {
     const dir = mkdtempSync(join(tmpdir(), "troupe-chaos-"));
     const stageA = await Troupe.form({
       actors: [ChaosCartActor],
