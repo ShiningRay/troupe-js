@@ -32,7 +32,7 @@ import { SqliteCueStore } from "./cues/sqlite.js";
 import { CueScheduler } from "./cues/scheduler.js";
 import type { ActorCueApi } from "./cues/actor-cues.js";
 import { directorCall, type DirectorDeps } from "./director/director.js";
-import type { Audience } from "./show/show.js";
+import type { Audience, ShowListener } from "./show/show.js";
 import { SqliteSubscriptionStore } from "./show/sqlite.js";
 import type { SubscriptionStore } from "./show/subscription-store.js";
 
@@ -126,6 +126,9 @@ export class Troupe {
     private readonly deployHistory = new DeployHistory(),
   ) {}
 
+  /** 进程内 callback 订阅（subscribe(topic, fn)）：仅本进程、不进集群目录、不落盘 */
+  private readonly localFnSubs = new Map<string, Set<ShowListener>>();
+
   // ---- 生产热替换（M11，DESIGN §9.4，独立实验）----
 
   /**
@@ -182,65 +185,118 @@ export class Troupe {
 
   // ---- Show（M6，DESIGN §2：演出，可演可看）----
 
-  /** 发布事件到话题；订阅者（Audience）经完整调用管道异步收到（尽力而为，at-most-once） */
+  /** 发布事件到话题；订阅者（Audience）经完整调用管道异步收到（尽力而为，at-most-once）。
+   *  进程内 callback 订阅者（subscribe(topic, fn)）在本次调用的 await 路径上同步收到。 */
   async publish(topic: string, event: unknown): Promise<void> {
-    if (this.cluster) return this.cluster.publish(topic, event);
-    const subs = this.localSubs.get(topic);
-    if (!subs || subs.size === 0) return;
-    await Promise.allSettled(
-      [...subs.values()].map(async (audience) => {
-        const key = `${audience.roleId}/${audience.stageName}.${audience.method}`;
-        let lastError: unknown;
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          try {
-            await this.stageManager.call({
-              callId: randomUUID(),
-              roleId: audience.roleId,
-              stageName: audience.stageName,
-              method: audience.method,
-              args: [event],
-              deadline: this.now() + this.defaultTimeoutMs,
-              hops: 0,
-            });
+    const fnSubs = this.localFnSubs.get(topic);
+    const fnTask =
+      fnSubs && fnSubs.size > 0
+        ? Promise.allSettled(
+            [...fnSubs].map(async (fn) => {
+              try {
+                await fn(event);
+                this.events.emit({
+                  type: "showDelivered",
+                  roleId: "<show>",
+                  method: topic,
+                  at: this.now(),
+                  detail: { listener: "callback" },
+                });
+              } catch (e) {
+                this.events.emit({
+                  type: "showDropped",
+                  roleId: "<show>",
+                  method: topic,
+                  at: this.now(),
+                  detail: {
+                    listener: "callback",
+                    error: e instanceof Error ? e.message : String(e),
+                  },
+                });
+              }
+            }),
+          )
+        : undefined;
+    if (this.cluster) await this.cluster.publish(topic, event);
+    else {
+      const subs = this.localSubs.get(topic);
+      if (subs && subs.size > 0) {
+        await Promise.allSettled(
+          [...subs.values()].map(async (audience) => {
+            const key = `${audience.roleId}/${audience.stageName}.${audience.method}`;
+            let lastError: unknown;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                await this.stageManager.call({
+                  callId: randomUUID(),
+                  roleId: audience.roleId,
+                  stageName: audience.stageName,
+                  method: audience.method,
+                  args: [event],
+                  deadline: this.now() + this.defaultTimeoutMs,
+                  hops: 0,
+                });
+                this.events.emit({
+                  type: "showDelivered",
+                  roleId: "<show>",
+                  method: topic,
+                  at: this.now(),
+                  detail: { audience: key, attempt },
+                });
+                return;
+              } catch (e) {
+                lastError = e;
+                if (attempt < 3) await sleepLocal(200 * attempt);
+              }
+            }
             this.events.emit({
-              type: "showDelivered",
+              type: "showDropped",
               roleId: "<show>",
               method: topic,
               at: this.now(),
-              detail: { audience: key, attempt },
+              detail: { audience: key, error: lastError instanceof Error ? lastError.message : String(lastError) },
             });
-            return;
-          } catch (e) {
-            lastError = e;
-            if (attempt < 3) await sleepLocal(200 * attempt);
-          }
-        }
-        this.events.emit({
-          type: "showDropped",
-          roleId: "<show>",
-          method: topic,
-          at: this.now(),
-          detail: { audience: key, error: lastError instanceof Error ? lastError.message : String(lastError) },
-        });
-      }),
-    );
+          }),
+        );
+      }
+    }
+    await fnTask;
   }
 
-  /** 订阅（Edge/测试用便捷门面；Actor 内推荐 this.subscribe） */
-  async subscribe(topic: string, audience: Audience): Promise<void> {
-    if (this.cluster) return this.cluster.subscribe(topic, audience);
+  /** 订阅（Edge/测试用便捷门面；Actor 内推荐 this.subscribe）。
+   *  传 Audience 走完整调用管道（集群下路由到话题归属 Stage）；
+   *  传函数则为进程内回调订阅——仅本进程收到、不落盘，返回退订函数。 */
+  async subscribe(topic: string, audience: Audience): Promise<void>;
+  async subscribe(topic: string, listener: ShowListener): Promise<() => Promise<void>>;
+  async subscribe(topic: string, audienceOrListener: Audience | ShowListener): Promise<void | (() => Promise<void>)> {
+    if (typeof audienceOrListener === "function") {
+      let subs = this.localFnSubs.get(topic);
+      if (!subs) {
+        subs = new Set();
+        this.localFnSubs.set(topic, subs);
+      }
+      subs.add(audienceOrListener); // Set 去重：同引用重复订阅幂等
+      return () => this.unsubscribe(topic, audienceOrListener);
+    }
+    if (this.cluster) return this.cluster.subscribe(topic, audienceOrListener);
     let subs = this.localSubs.get(topic);
     if (!subs) {
       subs = new Map();
       this.localSubs.set(topic, subs);
     }
-    subs.set(`${audience.roleId}\u0000${audience.stageName}\u0000${audience.method}`, audience);
+    subs.set(`${audienceOrListener.roleId}\u0000${audienceOrListener.stageName}\u0000${audienceOrListener.method}`, audienceOrListener);
   }
 
-  async unsubscribe(topic: string, audience: Audience): Promise<void> {
-    if (this.cluster) return this.cluster.unsubscribe(topic, audience);
+  async unsubscribe(topic: string, audience: Audience): Promise<void>;
+  async unsubscribe(topic: string, listener: ShowListener): Promise<void>;
+  async unsubscribe(topic: string, audienceOrListener: Audience | ShowListener): Promise<void> {
+    if (typeof audienceOrListener === "function") {
+      this.localFnSubs.get(topic)?.delete(audienceOrListener);
+      return;
+    }
+    if (this.cluster) return this.cluster.unsubscribe(topic, audienceOrListener);
     this.localSubs.get(topic)?.delete(
-      `${audience.roleId}\u0000${audience.stageName}\u0000${audience.method}`,
+      `${audienceOrListener.roleId}\u0000${audienceOrListener.stageName}\u0000${audienceOrListener.method}`,
     );
   }
 

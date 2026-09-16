@@ -21,7 +21,7 @@ export { HashRing, xxh32 } from "./cluster/hash-ring.js";
 export { type ClusterOptions } from "./cluster/cluster.js";
 export { Booth, type BoothOptions } from "./booth/server.js";
 export { directorCall, DIRECTOR_METHODS, type DirectorDeps, type DirectorMethod } from "./director/director.js";
-export { type Audience, ShowBroker } from "./show/show.js";
+export { type Audience, ShowBroker, type ShowListener } from "./show/show.js";
 export { SqliteSubscriptionStore } from "./show/sqlite.js";
 export { type SubscriptionRecord, type SubscriptionStore } from "./show/subscription-store.js";
 export { TraceBus, type TraceEvent, type TraceFilter, type TraceOptions } from "./core/trace.js";

@@ -18,6 +18,13 @@ export interface Audience {
   method: string;
 }
 
+/**
+ * 进程内回调订阅者（非 Actor 的边缘代码：WS/SSE 推送、仪表盘等）。
+ * 语义边界：仅发布进程本地收到（不进集群订阅目录、不落盘、Stage 重启即失效）；
+ * 回调在 publish 的 await 路径上执行——保持快速、非阻塞，长活请交给 Actor。
+ */
+export type ShowListener = (event: unknown) => void | Promise<void>;
+
 export function audienceKey(a: Audience): string {
   return `${a.roleId}\u0000${a.stageName}\u0000${a.method}`;
 }
