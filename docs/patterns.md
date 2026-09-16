@@ -108,6 +108,17 @@ override async onEvent(evt: unknown) { /* 至少一次：按业务幂等 */ }
 await troupe.publish(`chat:${room}`, message);
 ```
 
+**边缘推送（进程内 callback 订阅者）**：非 Actor 的 HTTP/WS 服务器想转发事件给浏览器，
+直接传函数订阅——省掉轮询或"BridgeActor 写模块级单例"的绕路：
+
+```typescript
+// tick/业务里发布：await this.publishShow(`room:${this.stageName}`, snapshot);
+const un = await troupe.subscribe(`room:${roomId}`, (snapshot) => {
+  for (const ws of roomSockets(roomId)) ws.send(JSON.stringify(snapshot)); // 保持快速
+});
+// 房间无人时 await un() 退订
+```
+
 完整示例：`examples/chat`（SSE 前端）、`examples/demo`、`npm run demo:m2`。
 
 ## 状态机 + schemaVersion 迁移

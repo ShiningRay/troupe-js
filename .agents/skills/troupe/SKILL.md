@@ -52,8 +52,10 @@ await cart.add("apple");
 | 定时（cron） | `@Cron("0 9 * * *") async daily() {}`（需 `form({ cues: true })`） |
 | 定时（周期，持久） | `@Every("30s")` 或 `this.scheduleReminder(name, { every, payload })` |
 | 延时任务（一次性） | `this.scheduleReminder(name, { at: Date.now() + ms, payload })`；完成时 `cancelReminder(name)` |
-| 内存定时器（仅在场） | `onStage()` 里 `this.registerCue("flush", "2s", fn)`（下场自动清理；忙则跳拍） |
+| 内存定时器（仅在场） | `onStage()` 里 `this.registerCue("flush", "2s", fn)`（下场自动清理；忙则跳拍，计入 `metrics.snapshot()[roleId].cueSkipped`） |
 | 订阅事件流 | `this.subscribe("topic")` + `override async onEvent(evt) {}`；发布 `this.publishShow(topic, evt)` |
+| 边缘推送（非 Actor 代码收广播） | `const un = await troupe.subscribe("topic", (evt) => {...})`（进程内 callback，快速非阻塞，`await un()` 退订） |
+| 最小 RPC 暴露面 | `static rpc = ["a", "b"]`：白名单收窄为清单 ∩ 公开方法，未知名 form 时 fail-fast |
 | 强制下场 | `await troupe.off(roleId, stageName)` |
 | 优雅停机 | `await troupe.shutdown()` |
 

@@ -63,9 +63,15 @@ static intermission       // 同 @Intermission
 static initialProps       // 初始状态工厂（结构化 Props 必须提供）
 static timeouts           // { method: ms } 按方法超时
 static improv / readOnly  // string[]，同 @Improv / @ReadOnly
+static rpc                // string[] RPC 允许清单（最小暴露面，见下）
 static schemaVersion      // 结构版本（迁移驱动）
 static codeVersion        // 热重载内部使用
 ```
+
+**`static rpc`（最小暴露面）**：默认所有公开方法（保留名/`_` 前缀除外）都在 RPC 白名单里；
+声明 `static rpc = ["peek", "join"]` 后白名单收窄为清单 ∩ 公开方法，清单外方法——本地 Agent
+代理直接不含该成员，wire/集群调用被 `CallRejectedError(reason: "whitelist")` 拒绝。清单里
+写出未知方法名在 `form()` 阶段 fail-fast（TypeError）。
 
 ## 装饰器
 
@@ -93,10 +99,24 @@ interface PropStore {
 ```typescript
 troupe.publish(topic, event);                     // 尽力扇出，至少一次（重试 3 次）
 await troupe.subscribe(topic, audience);          // audience = { roleId, stageName, method }
+const un = await troupe.subscribe(topic, (evt) => { ... });  // 进程内 callback 订阅者
+await un();                                       // 退订；同引用重复订阅幂等
 // Actor 内：
 this.subscribe(topic, method?); this.publishShow(topic, event);
 // 话题归属：HashRing("show:"+topic) 决定 coordinator；form({ show: { persist: true } }) 订阅落盘
 ```
+
+**callback 订阅者**（`ShowListener = (event) => void | Promise<void>`）面向非 Actor 的边缘代码
+（WS/SSE 推送、仪表盘）：发布进程本地直接收到、在 `publish` 的 await 路径上执行——保持快速，
+长活逻辑请交给 Actor；不进集群订阅目录、不落盘、Stage 重启失效。单进程场景等价于全局订阅。
+
+## 可观测
+
+`troupe.metrics.snapshot()` → `Record<roleId, RoleMetricsSnapshot>`：
+`calls / errors / rejections / cueSkipped / latency{p50,p99,max,samples}`。
+`cueSkipped` = 内存 Cue 上一拍未完成而跳拍的次数——游戏循环等周期任务变慢的首要信号，
+同时发 `cueSkipped` 埋点事件（detail.cue = Cue 名）。`form({ onEvent })` 或 `troupe.events.on`
+可订阅全部埋点（含 `showPublished/showDelivered/showDropped`）。
 
 ## Director / CLI
 
