@@ -18,6 +18,7 @@ export type TroupeEventType =
   | "membershipChanged"
   | "cueFired"
   | "cueFailed"
+  | "cueSkipped"
   | "showPublished"
   | "showDelivered"
   | "showDropped"
@@ -56,6 +57,8 @@ export interface RoleMetricsSnapshot {
   calls: number;
   errors: number;
   rejections: number;
+  /** 内存 Cue 因上一拍未完成而被跳过的次数（游戏循环变慢的首要信号） */
+  cueSkipped: number;
   latency: { p50: number; p99: number; max: number; samples: number };
 }
 
@@ -64,7 +67,7 @@ const RING_SIZE = 256;
 export class Metrics {
   private byRole = new Map<
     string,
-    { calls: number; errors: number; rejections: number; ring: number[] }
+    { calls: number; errors: number; rejections: number; cueSkipped: number; ring: number[] }
   >();
 
   constructor(private readonly now: () => number) {}
@@ -72,7 +75,7 @@ export class Metrics {
   private role(roleId: string) {
     let r = this.byRole.get(roleId);
     if (!r) {
-      r = { calls: 0, errors: 0, rejections: 0, ring: [] };
+      r = { calls: 0, errors: 0, rejections: 0, cueSkipped: 0, ring: [] };
       this.byRole.set(roleId, r);
     }
     return r;
@@ -91,6 +94,11 @@ export class Metrics {
     this.role(roleId).rejections++;
   }
 
+  /** 内存 Cue 跳拍计数（上一拍未完成，本拍丢弃） */
+  cueSkipped(roleId: string): void {
+    this.role(roleId).cueSkipped++;
+  }
+
   snapshot(): Record<string, RoleMetricsSnapshot> {
     const out: Record<string, RoleMetricsSnapshot> = {};
     for (const [roleId, r] of this.byRole) {
@@ -100,6 +108,7 @@ export class Metrics {
         calls: r.calls,
         errors: r.errors,
         rejections: r.rejections,
+        cueSkipped: r.cueSkipped,
         latency: {
           p50: pick(0.5),
           p99: pick(0.99),

@@ -542,7 +542,21 @@ export class StageManager {
     this.clearMemoryCue(slot, name);
     const entry = { timer: null as unknown as ReturnType<typeof setInterval>, fn, inFlight: false };
     entry.timer = setInterval(() => {
-      if (entry.inFlight || slot.state !== "running") return;
+      if (slot.state !== "running") return;
+      if (entry.inFlight) {
+        // 上一拍未完成：跳过本拍不堆积。这不是静默降级——游戏循环等周期任务
+        // 变慢的首要信号就在这里，计入 metrics 并发埋点（Booth/director 可见）。
+        this.metrics.cueSkipped(slot.meta.roleId);
+        this.events.emit({
+          type: "cueSkipped",
+          roleId: slot.meta.roleId,
+          stageName: slot.stageName,
+          method: name,
+          at: this.now(),
+          detail: { cue: name },
+        });
+        return;
+      }
       entry.inFlight = true;
       void this.call({
         callId: randomUUID(),
