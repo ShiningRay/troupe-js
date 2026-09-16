@@ -4,8 +4,9 @@ import { parseDuration } from "./duration.js";
 import { parseCronExpression } from "../cues/cron.js";
 import { registerDecoratedCues } from "./cue-dispatch.js";
 
-/** TS5 stage-3 类装饰器签名（内建 ClassDecorator 是 legacy 签名，不适用） */
-type Stage3ClassDecorator = (target: Function, context: ClassDecoratorContext) => Function | void;
+/** TS5 stage-3 类装饰器签名。实现都是原地标注（返回 void）——声明为 Function | void
+ *  会让带 static 成员的类在 strict 下报 TS1270，故收紧为 void。 */
+type Stage3ClassDecorator = (target: Function, context: ClassDecoratorContext) => void;
 
 /** 角色元数据：注册与调度所需的全部静态信息 */
 export interface RoleMeta {
@@ -47,7 +48,7 @@ const classMeta = new WeakMap<Function, DecoratorClassMeta>();
  * 角色声明（DESIGN §3.1）：默认写入进程级注册表（import 即入团）。
  * roleId 缺省 = 类名去 "Actor" 后缀。
  */
-export function Performs(role?: string): (target: Function, context: ClassDecoratorContext) => Function | void {
+export function Performs(role?: string): (target: Function, context: ClassDecoratorContext) => void {
   return (target: Function, _context: ClassDecoratorContext): void => {
     classMeta.set(target, { ...classMeta.get(target), role });
     registerActor(resolveRoleId(target, role), target, captureSource());
@@ -173,6 +174,8 @@ export function describeRole(
     intermission?: string | number;
     improv?: string[];
     readOnly?: string[];
+    /** RPC 允许清单：声明后仅列出的方法可被远程调用（默认全公开方法可调用） */
+    rpc?: readonly string[];
     timeouts?: Record<string, string | number>;
     schemaVersion?: number;
     initialProps?: () => unknown;
@@ -184,6 +187,20 @@ export function describeRole(
   const { names, improv, readOnly, persistentCues, localCues } = collectRpcMethods(ctor);
   for (const n of statics.improv ?? []) improv.add(n);
   for (const n of statics.readOnly ?? []) readOnly.add(n);
+
+  // static rpc 允许清单（§8.2 最小暴露面）：声明后白名单 = 清单 ∩ 公开方法。
+  // 列出未知方法名按拼错处理，注册期 fail-fast。
+  let rpcMethods = names;
+  if (statics.rpc) {
+    for (const n of statics.rpc) {
+      if (!names.has(n)) {
+        throw new TypeError(
+          `static rpc 含未知方法 "${n}"（角色 ${resolveRoleId(ctor, deco.role)}）——公开方法集：[${[...names].join(", ")}]`,
+        );
+      }
+    }
+    rpcMethods = new Set(statics.rpc);
+  }
 
   const timeouts = new Map<string, number>();
   for (const [method, v] of Object.entries(statics.timeouts ?? {})) {
@@ -205,7 +222,7 @@ export function describeRole(
       schemaVersion: statics.schemaVersion ?? 1,
       initialProps: statics.initialProps?.bind(ctor) ?? (() => ({})),
       codeVersion: statics.codeVersion ?? 1,
-      rpcMethods: names,
+      rpcMethods,
       persistentCues,
       localCues,
       source,
