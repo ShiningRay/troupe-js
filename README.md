@@ -225,6 +225,8 @@ cron 语义：5 字段（分 时 日 月 周，本地时间），支持 `*`、�
 | [docs/api-reference.md](./docs/api-reference.md) | 完整 API 与选项表 |
 | [docs/patterns.md](./docs/patterns.md) | 配方（库存/超时/重试/补偿/攒批/迁移） |
 | [docs/operations.md](./docs/operations.md) | 集群/所有权/可观测/热替换/CLI |
+| [docs/ORLEANS_GAP.md](./docs/ORLEANS_GAP.md) / [ROADMAP](./docs/ROADMAP.md) | Orleans 10.0 对标差距、分阶段门禁与 Issues 索引 |
+| [docs/VERIFICATION.md](./docs/VERIFICATION.md) | 当前本机验证结果与跳过项 |
 
 **AI 工具 Skill**：[`.agents/skills/troupe/`](./.agents/skills/troupe/)（SKILL.md + references，跨工具标准位置）——供各类 AI 编码工具加载，包含 API 速查、必守规则（每条来自真实 bug）、陷阱清单与模式配方。复制该目录到任何支持 agent skills 的工具即可。
 
