@@ -90,6 +90,51 @@ export class PostgresPropStore implements PropStore, OwnershipStore, DirectorySt
     this.pool = null;
   }
 
+  /**
+   * 显式事务（P2-4 Outbox）：fn 内可组合 `writeWithClient/createWithClient` 与
+   * Outbox 的 `appendInTx`——Props 与 Outbox 同事务提交（ADR 0005 §4：
+   * "Props 提交后 outbox 必存在"；任一步失败整体回滚）。
+   */
+  async withTransaction<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {
+    const c = await this.client();
+    try {
+      await c.query("BEGIN");
+      const result = await fn(c);
+      await c.query("COMMIT");
+      return result;
+    } catch (e) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw e;
+    } finally {
+      c.release();
+    }
+  }
+
+  /** 事务内 Props CAS 写（供 withTransaction 组合；语义与 write 完全一致，含 fencing） */
+  async writeWithClient(
+    c: PoolClient,
+    namespace: string,
+    roleId: string,
+    stageName: string,
+    props: unknown,
+    opts: WriteOptions,
+  ): Promise<StoredProps> {
+    return this.writeOn(c, namespace, roleId, stageName, props, opts);
+  }
+
+  /** 事务内首次创建（供 withTransaction 组合；语义与 create 一致，含 fencing） */
+  async createWithClient(
+    c: PoolClient,
+    namespace: string,
+    roleId: string,
+    stageName: string,
+    props: unknown,
+    schemaVersion: number,
+    opts?: CreateOptions,
+  ): Promise<StoredProps> {
+    return this.createOn(c, namespace, roleId, stageName, props, schemaVersion, opts);
+  }
+
   async read(namespace: string, roleId: string, stageName: string): Promise<StoredProps | null> {
     const c = await this.client();
     try {
@@ -186,6 +231,22 @@ export class PostgresPropStore implements PropStore, OwnershipStore, DirectorySt
   ): Promise<StoredProps> {
     const c = await this.client();
     try {
+      return await this.createOn(c, namespace, roleId, stageName, props, schemaVersion, opts);
+    } finally {
+      c.release();
+    }
+  }
+
+  private async createOn(
+    c: PoolClient,
+    namespace: string,
+    roleId: string,
+    stageName: string,
+    props: unknown,
+    schemaVersion: number,
+    opts?: CreateOptions,
+  ): Promise<StoredProps> {
+    {
       const mode = this.fencedMode(opts);
       const payload = JSON.stringify(props);
       if (mode === null) {
@@ -223,8 +284,6 @@ export class PostgresPropStore implements PropStore, OwnershipStore, DirectorySt
         throw new ConflictError(`记录已存在：${namespace}/${roleId}/${stageName}`, "exists");
       }
       return { props, revision: 1, schemaVersion };
-    } finally {
-      c.release();
     }
   }
 
@@ -237,6 +296,21 @@ export class PostgresPropStore implements PropStore, OwnershipStore, DirectorySt
   ): Promise<StoredProps> {
     const c = await this.client();
     try {
+      return await this.writeOn(c, namespace, roleId, stageName, props, opts);
+    } finally {
+      c.release();
+    }
+  }
+
+  private async writeOn(
+    c: PoolClient,
+    namespace: string,
+    roleId: string,
+    stageName: string,
+    props: unknown,
+    opts: WriteOptions,
+  ): Promise<StoredProps> {
+    {
       const mode = this.fencedMode(opts);
       const payload = JSON.stringify(props);
       const fencing =
@@ -285,8 +359,6 @@ export class PostgresPropStore implements PropStore, OwnershipStore, DirectorySt
         );
       }
       return { props, revision: opts.expectedRevision + 1, schemaVersion: opts.schemaVersion };
-    } finally {
-      c.release();
     }
   }
 
