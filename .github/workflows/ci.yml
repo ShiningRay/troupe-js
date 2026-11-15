@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # 矩阵 leg（ROADMAP P0-7）：ubuntu/windows × Node 22/24。
+  # PG 用例在本 leg 由连接串门控跳过，但跳过项全部列进 job summary（不静默）。
+  test:
+    name: test (${{ matrix.os }} / node${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm build
+      - name: test（跳过项写入 summary）
+        run: >
+          pnpm exec vitest run --reporter=default --reporter=json
+          --outputFile=test-results/vitest.json
+      - name: 跳过项汇总（不静默）
+        if: always()
+        shell: bash
+        run: node scripts/ci-skip-summary.mjs test-results/vitest.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.os }}-node${{ matrix.node }}
+          path: test-results/
+          retention-days: 14
+
+  # PG 必需 leg：真实 PostgreSQL 16 + TROUPE_REQUIRE_PG=1——任何跳过即 job 失败（P0-7）。
+  # SIGSTOP/SIGCONT 混沌用例在此 leg 必跑（Linux）。
+  pg-required:
+    name: pg-required (linux / node22 / postgres16)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: troupe_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TROUPE_REQUIRE_PG: "1"
+      TROUPE_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/troupe_test
+      TROUPE_TEST_PG: postgres://postgres:postgres@localhost:5432/troupe_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm build
+      - name: test（PG 必跑，跳过即失败）
+        run: >
+          pnpm exec vitest run --reporter=default --reporter=json
+          --outputFile=test-results/vitest.json
+      - name: 跳过项检查（REQUIRE_PG 下存在跳过 → 失败）
+        if: always()
+        run: node scripts/ci-skip-summary.mjs test-results/vitest.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-pg-required
+          path: test-results/
+          retention-days: 14
+
+  # issue #2：pg 为 optional peer——最小安装（无 pg）核心可用；安装 pg 后 Postgres Provider 可导入。
+  minimal-install:
+    name: minimal-install (no pg → + pg)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: npm pack --pack-destination ./pack
+      - name: 最小安装（无 pg）：troupe 可导入，SQLite/内存 Provider 可用
+        shell: bash
+        run: |
+          cd pack
+          npm init -y >/dev/null
+          npm install "$(ls troupe-*.tgz)" --no-optional --loglevel=error
+          node --input-type=module -e "
+            const m = await import('troupe');
+            if (typeof m.Troupe !== 'function') throw new Error('Troupe 导出缺失');
+            if (typeof m.SqlitePropStore !== 'function') throw new Error('SqlitePropStore 缺失');
+            console.log('[minimal-install] 无 pg：核心导入 OK');
+          "
+      - name: 安装 pg：PostgresPropStore 经 ./props/postgres 可导入
+        shell: bash
+        run: |
+          cd pack
+          npm install pg@^8 --loglevel=error
+          node --input-type=module -e "
+            const pg = await import('troupe/props/postgres');
+            if (typeof pg.PostgresPropStore !== 'function') throw new Error('PostgresPropStore 缺失');
+            const s = new pg.PostgresPropStore('postgres://invalid:invalid@127.0.0.1:1/none');
+            console.log('[minimal-install] 安装 pg：PostgresPropStore 可实例化 OK');
+          "

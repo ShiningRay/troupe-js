@@ -19,6 +19,10 @@
     "./testing": {
       "types": "./dist/testing/index.d.ts",
       "default": "./dist/testing/index.js"
+    },
+    "./props/postgres": {
+      "types": "./dist/props/postgres.d.ts",
+      "default": "./dist/props/postgres.js"
     }
   },
   "types": "./dist/index.d.ts",
@@ -48,5 +52,13 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0"
+  },
+  "peerDependencies": {
+    "pg": ">=8.11"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    }
   }
 }

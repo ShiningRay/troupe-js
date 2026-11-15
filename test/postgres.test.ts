@@ -6,10 +6,13 @@ import { wrapEnvelope } from "../src/core/envelope.js";
 /**
  * PostgresPropStore 验收（节点级共享存储 + 所有权，DESIGN §7.2/§6.5）。
  * 需要本地 Postgres：默认尝试 postgres://postgres:postgres@127.0.0.1:5432/postgres，
- * 可用 TROUPE_TEST_PG=postgres://user:pass@host:5432/db 指定；不可用时整组跳过。
+ * 可用 TROUPE_TEST_PG_URL（CI 统一名，兼容旧名 TROUPE_TEST_PG）=postgres://user:pass@host:5432/db 指定；
+ * 不可用时整组跳过（CI 中由 TROUPE_REQUIRE_PG=1 禁止静默跳过，ROADMAP P0-7）。
  */
 const conn =
-  process.env.TROUPE_TEST_PG ?? "postgres://postgres:postgres@127.0.0.1:5432/postgres";
+  process.env.TROUPE_TEST_PG_URL ??
+  process.env.TROUPE_TEST_PG ??
+  "postgres://postgres:postgres@127.0.0.1:5432/postgres";
 const schema = `troupe_test_${Date.now()}`;
 const store = new PostgresPropStore(conn, schema);
 
