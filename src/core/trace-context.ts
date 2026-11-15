@@ -16,6 +16,19 @@ export interface SpanContext {
 
 export const callAls = new AsyncLocalStorage<SpanContext>();
 
+/** 每 Turn 的协作取消信号（P2-5）：Actor 经 ctx.signal 读取；框架不强行中断 */
+const turnAls = new AsyncLocalStorage<AbortSignal>();
+
+/** 当前 Turn 的取消信号（Turn 外为 undefined；ctx.signal 兜底永不中止的信号） */
+export function currentTurnSignal(): AbortSignal | undefined {
+  return turnAls.getStore();
+}
+
+/** 在给定取消信号的作用域内运行（StageManager.runTurn 使用） */
+export function runWithTurnSignal<T>(signal: AbortSignal, fn: () => T): T {
+  return turnAls.run(signal, fn);
+}
+
 const HEX = "0123456789abcdef";
 
 function hex(n: number): string {

@@ -32,6 +32,13 @@ export interface ActorContext {
   };
   /** Show 发布（M6）：向话题发布事件 */
   publishShow?(topic: string, event: unknown): Promise<void>;
+  /**
+   * 协作取消信号（P2-5）：当前 Turn 的 AbortSignal——调用方经 troupe.abortCall(callId)
+   * 或 wire cancel 消息触发；Actor 自主检查 signal.aborted 并提前返回/抛错，
+   * 框架不强行中断 Turn（CPU 阻塞场景无法抢占，DESIGN §5.1）。
+   * Turn 外（onStage/offStage/Cue）为永不中止的信号。
+   */
+  readonly signal: AbortSignal;
 }
 
 const CTX = Symbol("troupe.actorCtx");
@@ -53,6 +60,14 @@ export abstract class Actor<TProps = unknown> {
 
   get stageName(): string {
     return this[CTX]?.stageName;
+  }
+
+  /**
+   * 运行时上下文（P2-5）：`this.ctx.signal.aborted` 协作取消、`this.ctx.now()`、
+   * `this.ctx.idem` 等。仅运行时激活的实例上存在（直接 new 的实例为 undefined）。
+   */
+  get ctx(): ActorContext {
+    return this[CTX] as ActorContext;
   }
 
   /**

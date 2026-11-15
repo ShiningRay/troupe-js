@@ -47,7 +47,8 @@ export class CallRejectedError extends TroupeError {
       | "whitelist"
       | "shutdown"
       | "drift"
-      | "ownership",
+      | "ownership"
+      | "cancelled",
     readonly retryable: boolean,
   ) {
     super(message);

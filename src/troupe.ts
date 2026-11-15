@@ -540,6 +540,8 @@ export class Troupe {
           showStore,
           // 目录化所有权（ADR 0004，P1-3）：共享存储支持 Directory 即启用目录路由
           ...(isDirectoryStore(propStore) ? { directory: propStore, leaseMs: opts.ownership?.leaseMs ?? 5_000 } : {}),
+          // 协作取消（P2-5）：入站 cancel 消息 → StageManager 中止信号
+          abortCall: (callId: string) => stageManager.abortCall(callId),
           // Show 投递（M6）：经完整调用管道（Playbill 路由 → 串行 Turn）。
           // Audience 可能在其它 Stage——必须走 route（本地执行/远程转发），
           // 回调运行晚于 form() 完成，cluster 变量此时已就绪。
@@ -881,9 +883,12 @@ export class Troupe {
           // 顶层调用保持 undefined → StageManager 生成全新根 trace（无父 Link）
           ...(callAls.getStore() ? { traceparent: callAls.getStore()!.traceparent } : {}),
         };
-        return cluster
+        const pending: Promise<unknown> = cluster
           ? cluster.route(env)
           : stageManager.call(env).then((r) => (this.localRef ? r : codecCopy(r)));
+        // 协作取消（P2-5）：把 callId 暴露在 Promise 上（p.callId → troupe.abortCall(p.callId)）
+        (pending as Promise<unknown> & { callId?: string }).callId = env.callId;
+        return pending;
       } catch (e) {
         return Promise.reject(e);
       }
@@ -894,6 +899,17 @@ export class Troupe {
   /** 管理下场：排空 → offStage → 移除（M4 Director.off 复用此通道） */
   off(roleId: string, stageName: string): Promise<void> {
     return this.stageManager.off(roleId, stageName);
+  }
+
+  /**
+   * 协作取消（P2-5，ROADMAP）：中止一个调用——cast 返回的 Promise 带 `callId` 属性
+   * （`(p as { callId?: string }).callId`）。排队中 → 直接拒绝（无副作用）；执行中 →
+   * `ctx.signal.aborted` 置位，Actor 自主提前返回（框架不强行 kill Turn）。
+   * 远程调用经 wire cancel 消息送达执行节点。返回 false = 未知/已 settle 的 callId。
+   */
+  abortCall(callId: string): boolean {
+    if (this.stageManager.abortCall(callId)) return true;
+    return this.cluster?.cancelCall(callId) ?? false;
   }
 
   /** 排空全部在场 Actor（测试钩子；不停机） */

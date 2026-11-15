@@ -64,6 +64,8 @@ export class Cluster {
   private readonly broker: ShowBroker;
   /** 目录路由器（ADR 0004）：deps.directory 提供且 start() 后就绪；null = 环路由（dev/未启用） */
   private router: DirectoryRouter | null = null;
+  /** 本节点已远程发出的 Call（P2-5：cancel 路由依据；应答后清除） */
+  private readonly callRoutes = new Map<string, string>();
   private stopped = false;
   selfAddr = "";
   private stageIdValue = "";
@@ -84,6 +86,8 @@ export class Cluster {
       directory?: DirectoryStore;
       /** 目录路由租约时长（ms；缺省 5000） */
       leaseMs?: number;
+      /** 协作取消（P2-5）：本节点中止 callId 的信号（StageManager.abortCall） */
+      abortCall?: (callId: string) => boolean;
     },
     private readonly opts: ClusterOptions = {},
   ) {
@@ -208,6 +212,18 @@ export class Cluster {
 
   ownerOf(roleId: string, stageName: string): string | null {
     return this.playbill.ownerOf(roleId, stageName);
+  }
+
+  /**
+   * 协作取消（P2-5，ROADMAP）：callId 在本 Stage → 本地中止；是本节点已远程发出的 Call
+   * → 向执行节点发 cancel 消息。两者皆非（未知/已 settle）返回 false。
+   */
+  cancelCall(callId: string): boolean {
+    if (this.deps.abortCall?.(callId)) return true;
+    const addr = this.callRoutes.get(callId);
+    if (!addr) return false;
+    void this.transport.send(addr, { t: "cancel", from: this.selfAddr, callId }).catch(() => {});
+    return true;
   }
 
   /** 目录路由统计（ADR 0004 §6 观测；未启用目录路由返回 null） */
@@ -394,10 +410,15 @@ export class Cluster {
       deadline: env.deadline,
       hops: env.hops ?? 0,
     };
-    const timeoutMs = Math.max(1, env.deadline - Date.now());
-    const res = await this.transport.request(addr, wire, env.callId, timeoutMs);
-    if (res.ok) return res.result;
-    throw decodeWireErr(res.err!);
+    this.callRoutes.set(env.callId, addr); // P2-5：cancel 路由依据
+    try {
+      const timeoutMs = Math.max(1, env.deadline - Date.now());
+      const res = await this.transport.request(addr, wire, env.callId, timeoutMs);
+      if (res.ok) return res.result;
+      throw decodeWireErr(res.err!);
+    } finally {
+      this.callRoutes.delete(env.callId);
+    }
   }
 
   private onWire(msg: WireMessage, reply: ReplyFn): void {
@@ -407,6 +428,11 @@ export class Cluster {
     }
     if (msg.t === "dir") {
       void this.handleDirector(msg, reply);
+      return;
+    }
+    if (msg.t === "cancel") {
+      // 协作取消（P2-5）：转交本 Stage 的信号源；无应答（调用方自行等待 Turn settle）
+      this.deps.abortCall?.(msg.callId);
       return;
     }
     if (msg.t === "sub" || msg.t === "unsub" || msg.t === "pub") {

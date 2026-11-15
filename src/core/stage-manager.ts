@@ -10,7 +10,7 @@ import type { ActorCueApi } from "../cues/actor-cues.js";
 import type { Audience } from "../show/show.js";
 import type { EventBus, Metrics } from "./events.js";
 import type { TraceBus, TraceEvent } from "./trace.js";
-import { callAls, childSpan } from "./trace-context.js";
+import { callAls, childSpan, currentTurnSignal, runWithTurnSignal } from "./trace-context.js";
 import {
   ActivationError,
   CallRejectedError,
@@ -72,7 +72,12 @@ interface PendingCall {
   reject: (e: unknown) => void;
   /** 入队时估算的字节数（排队预算扣减用） */
   bytes: number;
+  /** 协作取消（P2-5）：排队期与执行期共用同一信号；排队期取消 → 直接拒绝不启动 */
+  controller: AbortController;
 }
+
+/** Turn 外（onStage/offStage/Cue）ctx.signal 的兜底：永不中止 */
+const NEVER_ABORTED = new AbortController().signal;
 
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -146,6 +151,8 @@ const TURN_YIELD_INTERVAL = 64;
 
 export class StageManager {
   private readonly slots = new Map<string, ActorSlot>();
+  /** 在飞/排队的调用（P2-5 协作取消：callId → 信号源） */
+  private readonly activeCalls = new Map<string, AbortController>();
   private queuedBytes = 0;
   private closed = false;
   private leaseTicker: ReturnType<typeof setInterval> | null = null;
@@ -283,6 +290,18 @@ export class StageManager {
       if (slot === null) continue; // 排空已完成，重新走激活
       return this.enqueue(slot, env);
     }
+  }
+
+  /**
+   * 协作取消（P2-5）：中止 callId 的信号——排队中 → 下一拍拒绝不启动；
+   * 执行中 → ctx.signal.aborted 置位，Actor 自主提前返回（框架不强行 kill，
+   * CPU 阻塞场景无法抢占）。返回 false = 该 callId 不在本 Stage。
+   */
+  abortCall(callId: string): boolean {
+    const controller = this.activeCalls.get(callId);
+    if (!controller) return false;
+    controller.abort();
+    return true;
   }
 
   /** 管理下场（M4 Director 复用）：排空 → offStage → 移除 */
@@ -489,6 +508,10 @@ export class StageManager {
       const ctx: ActorContext = {
         roleId,
         stageName,
+        // 协作取消（P2-5）：Turn 内 = 本 Turn 的信号；Turn 外（onStage/offStage/Cue）= 永不中止
+        get signal() {
+          return currentTurnSignal() ?? NEVER_ABORTED;
+        },
         idem: slot.idem,
         idempotencyRetentionMs: this.config.idempotencyRetentionMs,
         now: this.now,
@@ -730,7 +753,9 @@ export class StageManager {
       }
       this.clearIdle(slot);
       slot.lastActivityAt = this.now();
-      slot.queue.push({ env, resolve, reject, bytes });
+      const controller = new AbortController();
+      this.activeCalls.set(env.callId, controller);
+      slot.queue.push({ env, resolve, reject, bytes, controller });
       this.queuedBytes += bytes;
       this.pump(slot);
     });
@@ -781,6 +806,7 @@ export class StageManager {
         if (this.now() >= head.env.deadline) {
           slot.queue.shift();
           this.queuedBytes -= head.bytes;
+          this.activeCalls.delete(head.env.callId);
           this.metrics.rejection(head.env.roleId);
           this.emitRejected(head.env, slot, "queued-expired");
           head.reject(
@@ -791,10 +817,27 @@ export class StageManager {
           );
           continue;
         }
+        if (head.controller.signal.aborted) {
+          // 排队期被取消（P2-5）：不启动 Turn（无副作用；调用方主动取消不适用可重试语义）
+          slot.queue.shift();
+          this.queuedBytes -= head.bytes;
+          this.activeCalls.delete(head.env.callId);
+          this.metrics.rejection(head.env.roleId);
+          this.emitRejected(head.env, slot, "cancelled");
+          head.reject(
+            new CallRejectedError(
+              `调用已被取消（callId=${head.env.callId}，排队期）——未开始执行，无副作用`,
+              "cancelled",
+              false,
+            ),
+          );
+          continue;
+        }
         if (!this.canStartTurn(slot, head)) break;
         slot.queue.shift();
         this.queuedBytes -= head.bytes;
-        this.startTurn(slot, head);
+        // activeCalls 保留至 settle（执行期 abortCall 依据；startTurn finally 删除）
+        this.startTurn(slot, head, head.controller);
         // 周期性让出事件循环（§5.3）：防止微任务连续流饿死定时器与 IO
         if (++turns % TURN_YIELD_INTERVAL === 0) {
           void Promise.resolve().then(() => this.pump(slot));
@@ -806,12 +849,13 @@ export class StageManager {
     }
   }
 
-  private startTurn(slot: ActorSlot, call: PendingCall): void {
+  private startTurn(slot: ActorSlot, call: PendingCall, controller: AbortController): void {
     const cls = this.classOf(slot.meta, call.env.method);
     slot.inflight++;
     if (cls === "annotated") slot.inflightAnnotated++;
     else slot.inflightStrict++;
-    void this.runTurn(slot, call).finally(() => {
+    void this.runTurn(slot, call, controller).finally(() => {
+      this.activeCalls.delete(call.env.callId);
       slot.inflight--;
       if (cls === "annotated") slot.inflightAnnotated--;
       else slot.inflightStrict--;
@@ -838,7 +882,7 @@ export class StageManager {
     }
   }
 
-  private async runTurn(slot: ActorSlot, call: PendingCall): Promise<void> {
+  private async runTurn(slot: ActorSlot, call: PendingCall, controller: AbortController): Promise<void> {
     const { env, resolve, reject } = call;
     const startedAt = this.now();
     this.events.emit({
@@ -879,11 +923,11 @@ export class StageManager {
             const cue = slot.memoryCues.get(env.args[0] as string);
             if (!cue) return undefined; // 已注销：静默完成
             // ALS 绑定：方法内 this.cast 自动携带本 Turn span 作为父（§11.4）
-            return callAls.run(span, () => cue.fn());
+            return runWithTurnSignal(controller.signal, () => callAls.run(span, () => cue.fn()));
           })()
         : (async () => {
             const fn = (inst as unknown as Record<string, (...a: unknown[]) => unknown>)[env.method];
-            return callAls.run(span, () => fn.apply(inst, env.args));
+            return runWithTurnSignal(controller.signal, () => callAls.run(span, () => fn.apply(inst, env.args)));
           })();
 
     const timeoutMs = Math.max(0, env.deadline - this.now());
@@ -1045,6 +1089,7 @@ export class StageManager {
   private rejectRemaining(slot: ActorSlot): void {
     for (const call of slot.queue.splice(0)) {
       this.queuedBytes -= call.bytes;
+      this.activeCalls.delete(call.env.callId);
       this.metrics.rejection(call.env.roleId);
       this.emitRejected(call.env, slot, "invalidated");
       call.reject(

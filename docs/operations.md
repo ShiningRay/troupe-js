@@ -67,3 +67,18 @@ troupe.subscribeTrace({ method: "add" }, fn);  // 实时订阅
 ```
 
 调用链自动传播：Actor 内 `this.cast` 携带当前 Turn span 作父；跨 Stage 经 wire 信封透传（同 traceId、不同 spanId）。
+
+
+## 协作取消（P2-5）
+
+调用方经 `troupe.abortCall(callId)` 取消一个调用；cast 返回的 Promise 携带 `callId`
+（`(p as { callId?: string }).callId`）。
+
+- **排队中**：直接拒绝（`CallRejectedError`，reason=`cancelled`，未开始执行无副作用；
+  调用方主动取消不适用"可安全重试"语义——是否重试由调用方决定）。
+- **执行中**：`ctx.signal.aborted` 置位，Actor 自主检查并提前返回（推荐每 20–100ms 检查）；
+  远程调用经 wire `cancel` 消息送达执行节点。**框架不强行 kill Turn**——CPU 阻塞/同步长循环
+  无法抢占，该类任务要么在循环中检查 `ctx.signal`，要么拆分为多个 Turn（每 Turn 有检查点）。
+- 取消不产生新的成功写：Actor 在 `signal.aborted` 时跳过 `saveProps`（数据面保证，ADR 0005 §5）。
+- 取消/超时/断连分类：排队期取消 = `cancelled`（非重试）；执行超时 = `CallTimeoutError`
+  （结果未知）；断连 = `UnknownOutcomeError`（按幂等键重试）。

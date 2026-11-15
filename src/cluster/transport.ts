@@ -69,6 +69,7 @@ export type WireMessage =
   | WireCall
   | WireResponse
   | WireDirector
+  | { t: "cancel"; from: string; callId: string }
   | WireShow
   | { t: "join"; from: string; inc: number; protocol: number; roles: string[]; token?: string }
   | { t: "join-nack"; from: string; reason: string }
