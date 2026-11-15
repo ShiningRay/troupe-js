@@ -153,6 +153,7 @@ export class PostgresOutboxStore {
       throw new TroupeError("publishWithProps 需要 PostgresPropStore（withTransaction 支持，ADR 0005 §4）");
     }
     const eventId = opts.eventId ?? randomUUID();
+    await this.poolReady(); // DDL 先行：事务内用的是 propStore 的连接
     return propStore.withTransaction(async (c) => {
       await this.appendInTx(c, topic, event, { eventId });
       let props: StoredProps | null = null;
