@@ -2,15 +2,15 @@
 
 面向 Node.js/TypeScript 的 **Virtual Actor** 框架。设计见 [DESIGN.md](./DESIGN.md)，开发计划见 [PLAN.md](./PLAN.md)。
 
-> 状态：**M1–M11 已交付**（里程碑计划内全部完成；L2 热替换为独立实验定位）——串行+交错运行时；SQLite/Codec/TCP 集群/信任边界；所有权（租约 + fencing）/成员硬化/production；持久 Cue（至少一次）+ Director/CLI + 指标端点；Trace 总线；Show/Audience（持久订阅 + 至少一次投递）；BoxOffice/追踪链；dev 热重载 + 生产热替换（签名/兼容检查/回滚）。
-> 要求 Node >= 22.13。
+> 状态：**M1–M11 已交付**；Orleans 对齐执行计划进行中——**当前完成 P0（可信基线）**：fencing 全路径反例闭合（[ADR 0002](./docs/adr/0002-ownership-fencing.md)）、续租失败停止接单、production Provider 门禁、CI 矩阵（Linux/Windows × Node 22/24 + PostgreSQL 必需 leg）。下一阶段 P1（生产 HA：目录化所有权 / PG CueStore / TLS+join / 3 节点混沌）见 [ROADMAP](./docs/ROADMAP.md)。
+> 能力声明以 [CI](https://github.com/ShiningRay/troupejs/actions) 与 [VERIFICATION](./docs/VERIFICATION.md) 为准，不以本文表述为准。要求 Node >= 22.13；production 集群要求跨节点安全 Provider（PostgresPropStore）。
 
 ## 快速开始（仓库内）
 
 ```bash
 npm install
 npm run typecheck        # tsc --noEmit
-npm test                 # vitest（150 例验收；M1–M11 全部验收 + Show 持久订阅/至少一次投递）
+npm test                 # vitest（用例数以套件与 CI 为准；含所有权/fencing 反例 F1-F6 与 Show 持久订阅）
 npm run build            # 构建 dist/
 npm run example          # examples/minimal（DESIGN §3.1 Cart）
 npm run demo             # examples/demo（8 段 M1 行为演示，含多 Actor 交互）
@@ -129,7 +129,7 @@ M4 验收（12 例新增）：CueStore CAS/租约；周期触发进串行 Turn +
 | Trace 总线：Turn 边界产出（调用方/方法/耗时/结果/超时态）；环形缓冲 1 万条 + 字节预算 + 采样 | `src/core/trace.ts` |
 | 实时订阅 `subscribeTrace(filter, fn)` + 历史查询 `traces(n, filter)` | `src/troupe.ts` |
 | Director `traces` 方法；CLI `tail [--role R] [秒]` / `top` | `src/director/`、`cli/troupe.ts` |
-| Show/Audience：话题 coordinator（HashRing `show:<topic>`）、Actor `subscribe/publishShow/onEvent` | `src/show/`、`src/core/actor.ts` |
+| Show/Audience：话题 coordinator（HashRing `show:<topic>`）、Actor `subscribe/publishShow/onEvent`；投递 = 实时尽力 + 3 次退避重试，**非 durable**（可能重复；持久流未实现，见 ROADMAP P2） | `src/show/`、`src/core/actor.ts` |
 | 跨 Stage：发布转发 coordinator fan-out、Audience 跨 Stage 经完整调用管道投递 | `src/cluster/cluster.ts` |
 
 ## M8 交付内容（BoxOffice + 调用链追踪 + 大规模基准）

@@ -5,9 +5,11 @@
  *   复用整条调用管道（Playbill 路由、串行 Turn、deadline、错误分类）
  * - Show = 话题化 pub/sub：话题按 HashRing 归属一个 coordinator Stage（"show:"+topic，
  *   延续无目录哲学）；订阅注册与发布都路由到 coordinator，由它 fan-out
- * - 投递语义（M6 首实现，明示）：**尽力而为（at-most-once）**——订阅者不在场会重新登台
- *   处理，但投递失败（角色未加载/超时）只记事件不重试；持久订阅/outbox 属后续
- * - 订阅目录存于 coordinator 内存：Stage 重启后订阅丢失，需客户端重订阅（文档边界）
+ * - 投递语义（M11+ 当前实现，明示）：**实时尽力投递 + 有限重试**——订阅者不在场会重新登台
+ *   处理；失败退避重试 3 次（200/400/800ms）后记 dropped；超时类失败可能重复投递（订阅方幂等）。
+ *   **非 durable**：事件不落盘，coordinator 重启丢在途事件；持久订阅只恢复订阅关系、
+ *   不重放历史。真正的持久流（Outbox/游标/重放）属 ROADMAP P2，尚未实现——文档不得宣称
+ * - 订阅目录存于 coordinator 内存：Stage 重启后订阅丢失，需客户端重订阅（持久订阅见 M11）
  */
 import type { SubscriptionStore } from "./subscription-store.js";
 

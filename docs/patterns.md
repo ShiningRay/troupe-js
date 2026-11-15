@@ -103,7 +103,7 @@ async send(msgId: string, user: string, text: string) {
 }
 // 订阅者（Audience）
 override async onStage() { await this.subscribe("chat:lobby"); }
-override async onEvent(evt: unknown) { /* 至少一次：按业务幂等 */ }
+override async onEvent(evt: unknown) { /* Show 非持久投递：重试 3 次后放弃、可能重复——按业务幂等；持久流见 ROADMAP P2 */ }
 // 发布
 await troupe.publish(`chat:${room}`, message);
 ```

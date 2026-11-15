@@ -112,7 +112,7 @@ Provider 必须在同一原子语句内校验所有权行 `owner_id + epoch + le
 ## Show / Audience
 
 ```typescript
-troupe.publish(topic, event);                     // 尽力扇出，至少一次（重试 3 次）
+troupe.publish(topic, event);                     // 实时尽力投递：失败退避重试 3 次（200/400/800ms）；非 durable，不重放
 await troupe.subscribe(topic, audience);          // audience = { roleId, stageName, method }
 const un = await troupe.subscribe(topic, (evt) => { ... });  // 进程内 callback 订阅者
 await un();                                       // 退订；同引用重复订阅幂等
@@ -120,6 +120,11 @@ await un();                                       // 退订；同引用重复订
 this.subscribe(topic, method?); this.publishShow(topic, event);
 // 话题归属：HashRing("show:"+topic) 决定 coordinator；form({ show: { persist: true } }) 订阅落盘
 ```
+
+**投递语义边界（与 ROADMAP P2-1 对齐，勿夸大）**：Show = 实时通知通道——失败退避重试
+3 次（200/400/800ms）后记 dropped；超时类失败可能重复投递（订阅方按业务幂等）；
+**非 durable**：事件不落盘，coordinator 重启丢在途事件，持久订阅只恢复订阅关系、
+不重放历史。可靠的持久流（seq/cursor/ack/replay）见 [ROADMAP P2](./ROADMAP.md)，当前未实现。
 
 **callback 订阅者**（`ShowListener = (event) => void | Promise<void>`）面向非 Actor 的边缘代码
 （WS/SSE 推送、仪表盘）：发布进程本地直接收到、在 `publish` 的 await 路径上执行——保持快速，
