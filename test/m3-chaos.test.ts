@@ -248,8 +248,11 @@ describe("M3 混沌验收：事件循环暂停 → 接管 → 旧持有者写入
       expect(outcome).toMatch(/^FENCED /);
       console.log(`  [chaos3] ${outcome.slice(0, 90)}…`);
 
-      // ⑤ 接管方继续可写
-      expect(await retryTransient(() => stageA.cast(ChaosCartActor, key).add("four"))).toBe(4);
+      // ⑤ 接管方继续可写。注意 at-least-once 语义（DESIGN §6.1 / ADR 0004 §4）：B 冻结期间
+      // socket 缓冲里可能存有已转发的 Call，恢复后按目录重放给新 owner——非幂等测试 Actor
+      // 会被重复执行（此处即 add("three") 可能重放）。业务按 ctx.idem 幂等吸收；断言只要求
+      // "接管方可继续成功写"（次数 ≥ 4），并已由 FENCED 证明旧 token 无成功写。
+      expect(await retryTransient(() => stageA.cast(ChaosCartActor, key).add("four"))).toBeGreaterThanOrEqual(4);
     } finally {
       b.child.kill("SIGKILL");
       c.child.kill("SIGKILL");
