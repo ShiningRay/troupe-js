@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -216,9 +216,10 @@ describe("M10 验收：keep（旧实例运行到自然下场）", () => {
 
 describe("M10 验收：createDevReloader（文件监听 + 版本化重导）", () => {
   it("修改 actor 文件保存 → 自动 reload（recycle，Props 无损）", async () => {
-    // realpathSync expands 8.3 short paths (GH Windows runner TMP=C:/Users/RUNNER~1/...):
-    // vite URL-encodes the '~' in the short name and fails to load the module (seen in CI)
-    const dir = mkdtempSync(join(realpathSync(tmpdir()), "troupe-dev-"));
+    // 临时 actor 文件放在项目目录下（CI 结束清理）：不用 os.tmpdir()——GH Windows runner
+    // 的 TMP 是 8.3 短路径（C:/Users/RUNNER~1/...），vite 对其中的 "~" 做 URL 编码后
+    // 模块加载失败（realpathSync 也不展开，两轮 CI 实证）。项目内路径无该问题。
+    const dir = mkdtempSync(join(process.cwd(), "tmp-hot-reload-"));
     const actorFile = join(dir, "counter.actor.ts");
     const baseUrl = pathToFileURL(join(process.cwd(), "src", "index.ts")).href;
     const v1 = `
@@ -231,38 +232,42 @@ describe("M10 验收：createDevReloader（文件监听 + 版本化重导）", (
       }
     `;
     writeFileSync(actorFile, v1);
-    const mod = (await import(`${pathToFileURL(actorFile).href}?init=${Date.now()}`)) as Record<string, unknown>;
-    const WatchedV1 = mod.WatchedActor as typeof Actor;
+    try {
+      const mod = (await import(`${pathToFileURL(actorFile).href}?init=${Date.now()}`)) as Record<string, unknown>;
+      const WatchedV1 = mod.WatchedActor as typeof Actor;
 
-    const troupe = await Troupe.form({
-      actors: [WatchedV1],
-      propStore: new InMemoryPropStore(),
-      defaultIntermission: 0,
-    });
-    // 直接实例化（绕过 Actor 基类依赖：重导后的类只需行为兼容）
-    const agent = { bump: () => (troupe.cast(WatchedV1, "w1") as unknown as { bump(): Promise<string> }).bump() };
-    expect(await agent.bump()).toBe("w1:1");
+      const troupe = await Troupe.form({
+        actors: [WatchedV1],
+        propStore: new InMemoryPropStore(),
+        defaultIntermission: 0,
+      });
+      // 直接实例化（绕过 Actor 基类依赖：重导后的类只需行为兼容）
+      const agent = { bump: () => (troupe.cast(WatchedV1, "w1") as unknown as { bump(): Promise<string> }).bump() };
+      expect(await agent.bump()).toBe("w1:1");
 
-    const reloaded: Array<{ toVersion: number }> = [];
-    const reloader = createDevReloader(troupe, {
-      watch: [actorFile],
-      policy: "recycle",
-      onReload: (r) => reloaded.push(r),
-      onError: (e) => console.log("RELOADER_ERR:", e),
-    });
+      const reloaded: Array<{ toVersion: number }> = [];
+      const reloader = createDevReloader(troupe, {
+        watch: [actorFile],
+        policy: "recycle",
+        onReload: (r) => reloaded.push(r),
+        onError: (e) => console.log("RELOADER_ERR:", e),
+      });
 
-    // 保存 v2
-    const v2 = readFileSync(actorFile, "utf8").replace("+= 1", "+= 100").replace(/w1:/, "w2:");
-    writeFileSync(actorFile, v2);
-    await sleep(300);
-    // 手动触发一次重导（fs.watch 事件在 CI 可能延迟——直接驱动同一管线）
-    const mod2 = (await import(`${pathToFileURL(actorFile).href}?t=${Date.now()}`)) as Record<string, unknown>;
-    await troupe.reloadActorClass(mod2.WatchedActor as Function, { policy: "recycle", source: v2 });
+      // 保存 v2
+      const v2 = readFileSync(actorFile, "utf8").replace("+= 1", "+= 100").replace(/w1:/, "w2:");
+      writeFileSync(actorFile, v2);
+      await sleep(300);
+      // 手动触发一次重导（fs.watch 事件在 CI 可能延迟——直接驱动同一管线）
+      const mod2 = (await import(`${pathToFileURL(actorFile).href}?t=${Date.now()}`)) as Record<string, unknown>;
+      await troupe.reloadActorClass(mod2.WatchedActor as Function, { policy: "recycle", source: v2 });
 
-    expect(await agent.bump()).toBe("w2:101"); // +100 生效，计数延续
-    await waitUntil(() => reloaded.length >= 1, 5_000);
-    expect(reloaded[0].toVersion).toBe(2);
-    reloader.stop();
-    await troupe.drainAll();
+      expect(await agent.bump()).toBe("w2:101"); // +100 生效，计数延续
+      await waitUntil(() => reloaded.length >= 1, 5_000);
+      expect(reloaded[0].toVersion).toBe(2);
+      reloader.stop();
+      await troupe.drainAll();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

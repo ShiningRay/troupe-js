@@ -5,3 +5,4 @@ dist/
 .zcode
 test-results/
 .ci-pack-test/
+tmp-hot-reload
