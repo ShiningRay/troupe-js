@@ -8,7 +8,8 @@ export {
 } from "./core/actor.js";
 export { Performs, Intermission, Improv, ReadOnly, Cron, Every, Local, type RoleMeta } from "./core/meta.js";
 export { type Agent, type AgentRpcMethodNames } from "./core/agent.js";
-export { type PropStore, type StoredProps, type WriteOptions } from "./props/prop-store.js";
+export { type PropStore, type StoredProps, type WriteOptions, type CreateOptions, type FencingOptions } from "./props/prop-store.js";
+export { type StoreCapabilities } from "./props/capabilities.js";
 export { InMemoryPropStore } from "./props/memory.js";
 export { SqlitePropStore } from "./props/sqlite.js";
 export { isOwnershipStore, type OwnershipStore, type OwnershipRecord, type AcquireResult } from "./props/ownership.js";

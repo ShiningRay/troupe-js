@@ -1,5 +1,6 @@
 import { ConflictError } from "../core/errors.js";
-import type { PropStore, StoredProps, WriteOptions } from "./prop-store.js";
+import type { StoreCapabilities } from "./capabilities.js";
+import type { CreateOptions, PropStore, StoredProps, WriteOptions } from "./prop-store.js";
 import type { AcquireResult, OwnershipRecord, OwnershipStore } from "./ownership.js";
 // pg 为可选 peer 依赖：仅在选用 PostgresPropStore 时需要安装（PLAN §5）
 import { Pool, type PoolClient } from "pg";
@@ -7,11 +8,19 @@ import { Pool, type PoolClient } from "pg";
 /**
  * 节点级共享持久化（DESIGN §7.2，M3）：PostgresPropStore。
  * - 行级 CAS（单条 UPDATE ... WHERE revision = ?）
- * - write 携 fencingToken 时在同一语句内校验所有权 epoch（§6.5，旧持有者写入被拒）
+ * - write 携 fencing 参数时在同一语句内校验所有权（ADR 0002 I3）
  * - 所有权 acquire/续租/顶替/释放均为单语句原子操作（依赖行锁）
  * 选择：Troupe.form({ propStore: new PostgresPropStore("postgres://…") })
+ *
+ * capabilities（ADR 0002 §8）：跨节点安全 + 支持 fencing（P0 唯一满足 production 门禁的 Provider）。
  */
 export class PostgresPropStore implements PropStore, OwnershipStore {
+  readonly capabilities: StoreCapabilities = {
+    crossNodeSafe: true,
+    supportsFencing: true,
+    supportsTransactions: true,
+  };
+
   private pool: Pool | null = null;
 
   constructor(
@@ -92,6 +101,7 @@ export class PostgresPropStore implements PropStore, OwnershipStore {
     stageName: string,
     props: unknown,
     schemaVersion: number,
+    opts?: CreateOptions,
   ): Promise<StoredProps> {
     const c = await this.client();
     try {
@@ -176,7 +186,12 @@ export class PostgresPropStore implements PropStore, OwnershipStore {
     }
   }
 
-  async delete(namespace: string, roleId: string, stageName: string): Promise<void> {
+  async delete(
+    namespace: string,
+    roleId: string,
+    stageName: string,
+    _opts?: { fencingToken?: number; fencingOwner?: string },
+  ): Promise<void> {
     const c = await this.client();
     try {
       await c.query(
@@ -223,7 +238,7 @@ export class PostgresPropStore implements PropStore, OwnershipStore {
       );
       const row = r.rows[0] as { owner_id: string; epoch: string; lease_until: string };
       if (row.owner_id === ownerId) {
-        return { ok: true, epoch: Number(row.epoch) };
+        return { ok: true, epoch: Number(row.epoch), leaseUntil: Number(row.lease_until) };
       }
       return {
         ok: false,

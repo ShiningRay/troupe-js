@@ -82,17 +82,32 @@ static codeVersion        // 热重载内部使用
 
 ```typescript
 interface PropStore {
+  readonly capabilities: StoreCapabilities;       // 能力声明（ADR 0002 §8）
   read(ns, roleId, stageName): Promise<StoredProps | null>;
-  create(...): Promise<StoredProps>;              // 不存在才成功（原子）
-  write(..., { expectedRevision, schemaVersion, fencingToken? }): Promise<StoredProps>;
-  delete?(...): Promise<void>;
+  create(..., opts?: { fencingToken?, fencingOwner? }): Promise<StoredProps>; // 不存在才成功（原子）；带 token 时校验所有权
+  write(..., { expectedRevision, schemaVersion, fencingToken?, fencingOwner? }): Promise<StoredProps>;
+  delete?(..., opts?: { fencingToken?, fencingOwner? }): Promise<void>;
 }
 // StoredProps = { props, revision, schemaVersion }
+// StoreCapabilities = { crossNodeSafe, supportsFencing, supportsTransactions? }
 ```
 
-实现：`InMemoryPropStore` / `SqlitePropStore`（进程级）/ `PostgresPropStore`（节点级，peer 依赖 `pg`）。
-`CueStore`：`InMemoryCueStore` / `SqliteCueStore`（持久提醒）。
-`OwnershipStore`：SQLite（同机多进程）/ Postgres（多机）——租约 + fencing token。
+fencing 语义（ADR [0002](./adr/0002-ownership-fencing.md)）：携带 `{fencingToken, fencingOwner}` 时，
+Provider 必须在同一原子语句内校验所有权行 `owner_id + epoch + lease_until > now（存储时钟）`；
+行缺失 = `ConflictError(kind="fencing")`，租约过期 = `kind="lease-expired"`。
+未启用 ownership（token 缺省）时不做校验——该模式不承诺跨节点安全。
+
+实现与能力声明：
+
+| Provider | crossNodeSafe | supportsFencing | 边界 |
+|---|---|---|---|
+| `InMemoryPropStore` | ✗ | ✗ | 进程内（Rehearsal/测试） |
+| `SqlitePropStore` | ✗ | ✓ | 仅**同机**多进程；跨主机共享盘不安全，production 被 P0-6 门禁拒绝（`allowUnsafeProviders` 显式豁免） |
+| `PostgresPropStore` | ✓ | ✓ | 多机（peer 依赖 `pg`） |
+
+`CueStore`：`InMemoryCueStore` / `SqliteCueStore`（持久提醒；同样声明 capabilities，PG CueStore 为 P1-5 留位）。
+`OwnershipStore`：SQLite（同机多进程）/ Postgres（多机）——租约 + fencing token；
+`acquire` 成功返回 `{ ok: true, epoch, leaseUntil }`（leaseUntil 为存储时钟域，ADR 0002 §5）。
 
 ## Show / Audience
 

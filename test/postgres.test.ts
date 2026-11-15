@@ -43,12 +43,12 @@ describe.skipIf(!pgOk)("M3 验收：PostgresPropStore（行级 CAS + 所有权 +
 
   it("所有权：acquire/续租/顶替/release 保序（epoch 单调）", async () => {
     const a1 = await store.acquire("ns", "Cart", "u2", "pg-A", 5_000);
-    expect(a1).toEqual({ ok: true, epoch: 1 });
+    expect(a1).toEqual({ ok: true, epoch: 1, leaseUntil: expect.any(Number) });
     const b1 = await store.acquire("ns", "Cart", "u2", "pg-B", 5_000);
     expect(b1).toMatchObject({ ok: false, holder: { ownerId: "pg-A" } });
-    expect(await store.acquire("ns", "Cart", "u2", "pg-A", 5_000)).toEqual({ ok: true, epoch: 1 }); // 续租
+    expect(await store.acquire("ns", "Cart", "u2", "pg-A", 5_000)).toEqual({ ok: true, epoch: 1, leaseUntil: expect.any(Number) }); // 续租
     expect(await store.release("ns", "Cart", "u2", "pg-A", 1)).toBe(true);
-    expect(await store.acquire("ns", "Cart", "u2", "pg-B", 5_000)).toEqual({ ok: true, epoch: 2 }); // 顶替
+    expect(await store.acquire("ns", "Cart", "u2", "pg-B", 5_000)).toEqual({ ok: true, epoch: 2, leaseUntil: expect.any(Number) }); // 顶替
   });
 
   it("fencing：旧 token 写入被拒（单语句原子校验）", async () => {
@@ -60,7 +60,7 @@ describe.skipIf(!pgOk)("M3 验收：PostgresPropStore（行级 CAS + 所有权 +
       fencingToken: 1,
     });
     await sleep(120); // 租约过期
-    expect(await store.acquire("ns", "Cart", "u3", "pg-B", 10_000)).toEqual({ ok: true, epoch: 2 });
+    expect(await store.acquire("ns", "Cart", "u3", "pg-B", 10_000)).toEqual({ ok: true, epoch: 2, leaseUntil: expect.any(Number) });
     const err = await store
       .write("ns", "Cart", "u3", wrapEnvelope({ items: ["stale"] }, {}), {
         expectedRevision: 2,

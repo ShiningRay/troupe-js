@@ -1,7 +1,10 @@
 import { cloneReminderPayload, type CueStore, type ReminderKey, type ReminderRecord } from "./cue-store.js";
+import type { StoreCapabilities } from "../props/capabilities.js";
 
-/** 进程内 CueStore（Rehearsal / 测试 / M4 单机） */
+/** 进程内 CueStore（Rehearsal / 测试 / M4 单机）：非跨节点安全（ADR 0002 §8） */
 export class InMemoryCueStore implements CueStore {
+  readonly capabilities: StoreCapabilities = { crossNodeSafe: false, supportsFencing: false };
+
   private data = new Map<string, ReminderRecord>();
 
   private k(key: ReminderKey | ReminderRecord): string {

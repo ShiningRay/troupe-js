@@ -17,20 +17,20 @@ describe("M3 验收：所有权契约（DESIGN §6.5，SQLite 共享存储）", 
     const store = tmpStore();
     // 首次获取
     const a1 = await store.acquire("ns", "Cart", "u1", "stage-A", 10_000);
-    expect(a1).toEqual({ ok: true, epoch: 1 });
+    expect(a1).toEqual({ ok: true, epoch: 1, leaseUntil: expect.any(Number) });
     // 他人获取：租约未过期 → 拒绝并返回持有者
     const b1 = await store.acquire("ns", "Cart", "u1", "stage-B", 10_000);
     expect(b1).toMatchObject({ ok: false, holder: { ownerId: "stage-A", epoch: 1 } });
     // 本人续租：epoch 不变
     const a2 = await store.acquire("ns", "Cart", "u1", "stage-A", 10_000);
-    expect(a2).toEqual({ ok: true, epoch: 1 });
+    expect(a2).toEqual({ ok: true, epoch: 1, leaseUntil: expect.any(Number) });
     // 释放：owner+epoch 匹配才生效
     expect(await store.release("ns", "Cart", "u1", "stage-B", 1)).toBe(false); // 他人无效
     expect(await store.release("ns", "Cart", "u1", "stage-A", 99)).toBe(false); // 错 epoch 无效
     expect(await store.release("ns", "Cart", "u1", "stage-A", 1)).toBe(true);
     // 释放后他人可获取（新周期）
     const b2 = await store.acquire("ns", "Cart", "u1", "stage-B", 10_000);
-    expect(b2).toEqual({ ok: true, epoch: 2 }); // 顶替路径：epoch+1
+    expect(b2).toEqual({ ok: true, epoch: 2, leaseUntil: expect.any(Number) }); // 顶替路径：epoch+1
   });
 
   it("租约过期后可被顶替（epoch 递增）——kill -9 接管的时间窗", async () => {
@@ -38,7 +38,7 @@ describe("M3 验收：所有权契约（DESIGN §6.5，SQLite 共享存储）", 
     await store.acquire("ns", "Cart", "u1", "stage-A", 60); // 短租约
     await sleep(120); // 过期
     const b = await store.acquire("ns", "Cart", "u1", "stage-B", 10_000);
-    expect(b).toEqual({ ok: true, epoch: 2 });
+    expect(b).toEqual({ ok: true, epoch: 2, leaseUntil: expect.any(Number) });
   });
 
   it("fencing：旧 epoch 的写入被拒（暂停后恢复的旧持有者，M3 核心语义）", async () => {
@@ -52,7 +52,7 @@ describe("M3 验收：所有权契约（DESIGN §6.5，SQLite 共享存储）", 
     // 租约过期 → B 顶替（epoch+1）
     await sleep(120);
     const b = await store.acquire("ns", "Cart", "u1", "stage-B", 10_000);
-    expect(b).toEqual({ ok: true, epoch: 2 });
+    expect(b).toEqual({ ok: true, epoch: 2, leaseUntil: expect.any(Number) });
     // A（暂停后恢复）用旧 token 写入 → fencing 拒绝
     const err = await store
       .write("ns", "Cart", "u1", wrapEnvelope({ items: ["stale"] }, {}), {

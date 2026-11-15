@@ -3,7 +3,8 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { ConflictError } from "../core/errors.js";
-import type { PropStore, StoredProps, WriteOptions } from "./prop-store.js";
+import type { StoreCapabilities } from "./capabilities.js";
+import type { CreateOptions, PropStore, StoredProps, WriteOptions } from "./prop-store.js";
 import type { AcquireResult, OwnershipRecord, OwnershipStore } from "./ownership.js";
 
 // vitest/vite 尚不识别 node:sqlite 内建，改为运行时 require（类型仍静态检查）
@@ -15,10 +16,19 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
  * 进程级持久化（DESIGN §7.2，M2）：`node:sqlite`，零 npm 依赖。
  * - 懒初始化：首次用到才建目录/建库/建表
  * - WAL + busy_timeout：支持同机多进程共享库文件（M3 所有权场景）
- * - create/write 以单条语句原子实现 CAS 合同；write 携 fencingToken 时校验所有权（§6.5）
+ * - create/write 以单条语句原子实现 CAS 合同；write 携 fencingToken 时校验所有权（ADR 0002）
  * - 附带所有权表（M3）：acquire/renew/顶替/释放均为单语句原子操作
+ *
+ * capabilities（ADR 0002 §8）：crossNodeSafe=false——SQLite 仅同机多进程安全，
+ * 跨主机共享盘的锁语义不成立；production 门禁（P0-6）据此拒绝，allowUnsafeProviders 显式豁免。
  */
 export class SqlitePropStore implements PropStore, OwnershipStore {
+  readonly capabilities: StoreCapabilities = {
+    crossNodeSafe: false,
+    supportsFencing: true,
+    supportsTransactions: true,
+  };
+
   private db: DatabaseSyncType | null = null;
   private stmts: {
     get: ReturnType<DatabaseSyncType["prepare"]>;
@@ -124,6 +134,7 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
     stageName: string,
     props: unknown,
     schemaVersion: number,
+    opts?: CreateOptions,
   ): Promise<StoredProps> {
     this.ensure();
     try {
@@ -193,7 +204,12 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
     return { props, revision: opts.expectedRevision + 1, schemaVersion: opts.schemaVersion };
   }
 
-  async delete(namespace: string, roleId: string, stageName: string): Promise<void> {
+  async delete(
+    namespace: string,
+    roleId: string,
+    stageName: string,
+    _opts?: { fencingToken?: number; fencingOwner?: string },
+  ): Promise<void> {
     this.ensure();
     this.stmts!.del.run(namespace, roleId, stageName);
   }
@@ -216,7 +232,7 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
     if (!row) {
       try {
         this.stmts!.ownInsert.run(namespace, roleId, stageName, ownerId, until);
-        return { ok: true, epoch: 1 };
+        return { ok: true, epoch: 1, leaseUntil: until };
       } catch (e) {
         if (!isUniqueViolation(e)) throw e;
         // 并发抢占落败：走下面的续租/顶替路径
@@ -224,13 +240,13 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
     } else if (row.owner_id === ownerId) {
       // 续租：epoch 不变
       const c = this.stmts!.ownRenew.run(until, namespace, roleId, stageName, ownerId, row.epoch).changes;
-      if (c === 1) return { ok: true, epoch: row.epoch };
+      if (c === 1) return { ok: true, epoch: row.epoch, leaseUntil: until };
     }
     // 顶替过期租约：epoch + 1（fencing token 单调递增）
     const c = this.stmts!.ownTakeover.run(ownerId, until, namespace, roleId, stageName, now).changes;
     if (c === 1) {
       const fresh = this.stmts!.ownGet.get(namespace, roleId, stageName) as { epoch: number };
-      return { ok: true, epoch: Number(fresh.epoch) };
+      return { ok: true, epoch: Number(fresh.epoch), leaseUntil: until };
     }
     const holder = (this.stmts!.ownGet.get(namespace, roleId, stageName) as {
       owner_id: string;

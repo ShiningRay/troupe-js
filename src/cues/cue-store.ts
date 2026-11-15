@@ -35,10 +35,13 @@ export interface ReminderRecord {
 }
 
 import { nextCronTime, parseCronExpression } from "./cron.js";
+import type { StoreCapabilities } from "../props/capabilities.js";
 
 export type ReminderKey = Pick<ReminderRecord, "namespace" | "roleId" | "stageName" | "name">;
 
 export interface CueStore {
+  /** 能力声明（ADR 0002 §8）：production + cues 门禁依据（P0-6）；PG CueStore 为 P1-5 留位 */
+  readonly capabilities: StoreCapabilities;
   /** 插入或更新计划与负载（statusVersion+1：撤销在途 complete 的竞争） */
   upsert(rec: Omit<ReminderRecord, "statusVersion" | "leaseUntil" | "owner">): Promise<void>;
   /** 声明式登记（@Cron/@Every 自动注册用）：仅当不存在时插入，不重置已存在的 nextDue */

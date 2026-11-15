@@ -1,11 +1,15 @@
 import { ConflictError } from "../core/errors.js";
-import type { PropStore, StoredProps, WriteOptions } from "./prop-store.js";
+import type { StoreCapabilities } from "./capabilities.js";
+import type { CreateOptions, PropStore, StoredProps, WriteOptions } from "./prop-store.js";
 
 /**
  * 进程内实现（DESIGN §7.2）：Rehearsal / 测试 / M1 默认。
  * 读写均做深拷贝，模拟复制边界（完整的 Codec 边界语义在 M2 交付）。
+ * capabilities（ADR 0002 §8）：非跨节点安全、无 fencing 实现——production 被 I5 拒绝。
  */
 export class InMemoryPropStore implements PropStore {
+  readonly capabilities: StoreCapabilities = { crossNodeSafe: false, supportsFencing: false };
+
   private data = new Map<string, StoredProps>();
 
   private key(namespace: string, roleId: string, stageName: string): string {
@@ -23,6 +27,7 @@ export class InMemoryPropStore implements PropStore {
     stageName: string,
     props: unknown,
     schemaVersion: number,
+    _opts?: CreateOptions,
   ): Promise<StoredProps> {
     const k = this.key(namespace, roleId, stageName);
     if (this.data.has(k)) {
@@ -56,7 +61,7 @@ export class InMemoryPropStore implements PropStore {
     return structuredClone(rec);
   }
 
-  async delete(namespace: string, roleId: string, stageName: string): Promise<void> {
+  async delete(namespace: string, roleId: string, stageName: string, _opts?: { fencingToken?: number; fencingOwner?: string }): Promise<void> {
     this.data.delete(this.key(namespace, roleId, stageName));
   }
 }

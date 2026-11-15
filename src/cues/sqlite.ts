@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import type { CueStore, ReminderKey, ReminderRecord } from "./cue-store.js";
 import { cloneReminderPayload } from "./cue-store.js";
+import type { StoreCapabilities } from "../props/capabilities.js";
 
 // vitest/vite 尚不识别 node:sqlite 内建，改为运行时 require（类型仍静态检查）
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
@@ -25,8 +26,10 @@ interface CueRow {
   owner: string | null;
 }
 
-/** 持久提醒的 SQLite 实现（DESIGN §7.5；同机多进程经 SQLite 行锁原子 claim） */
+/** 持久提醒的 SQLite 实现（DESIGN §7.5；同机多进程经 SQLite 行锁原子 claim；跨主机不安全，ADR 0002 §8） */
 export class SqliteCueStore implements CueStore {
+  readonly capabilities: StoreCapabilities = { crossNodeSafe: false, supportsFencing: false };
+
   private db: DatabaseSyncType | null = null;
   private stmts: {
     upsert: ReturnType<DatabaseSyncType["prepare"]>;

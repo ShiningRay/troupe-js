@@ -14,7 +14,13 @@ export interface OwnershipRecord {
   leaseUntil: number;
 }
 
-export type AcquireResult = { ok: true; epoch: number } | { ok: false; holder: OwnershipRecord };
+/**
+ * acquire 成功返回 DB 时钟域的 leaseUntil（ADR 0002 §5）：
+ * 节点本地 Date.now() 只做续租节拍近似提示，租约有效性判定以存储时钟为准。
+ */
+export type AcquireResult =
+  | { ok: true; epoch: number; leaseUntil: number }
+  | { ok: false; holder: OwnershipRecord };
 
 export interface OwnershipStore {
   /** 获取/续租所有权（原子）；leaseMs 为租约时长 */
