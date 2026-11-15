@@ -12,11 +12,25 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
   DatabaseSync: new (path: string) => DatabaseSyncType;
 };
 
+/** SQLite 存储时钟（epoch ms；租约判定唯一权威，ADR 0002 §5——SQLite 仅同机，与系统时钟同源） */
+const SQLITE_DB_NOW_MS =
+  "(CAST(strftime('%s','now') AS INTEGER) * 1000 + CAST(substr(strftime('%f','now'), -3) AS INTEGER))";
+
+/** 所有权有效性 EXISTS 子句（ADR 0002 I3）：行必须存在且 owner/epoch 匹配、租约未过期 */
+function ownershipExistsSql(alias: string, withOwner: boolean): string {
+  const owner = withOwner ? ` AND ${alias}.owner_id = ?` : "";
+  return `EXISTS (
+    SELECT 1 FROM ownership ${alias}
+    WHERE ${alias}.namespace = ? AND ${alias}.role_id = ? AND ${alias}.stage_name = ?${owner}
+      AND ${alias}.epoch = ? AND ${alias}.lease_until > ${SQLITE_DB_NOW_MS}
+  )`;
+}
+
 /**
  * 进程级持久化（DESIGN §7.2，M2）：`node:sqlite`，零 npm 依赖。
  * - 懒初始化：首次用到才建目录/建库/建表
  * - WAL + busy_timeout：支持同机多进程共享库文件（M3 所有权场景）
- * - create/write 以单条语句原子实现 CAS 合同；write 携 fencingToken 时校验所有权（ADR 0002）
+ * - create/write 以单条语句原子实现 CAS 合同；fencing 在同一语句内校验所有权行（ADR 0002 I1/I3）
  * - 附带所有权表（M3）：acquire/renew/顶替/释放均为单语句原子操作
  *
  * capabilities（ADR 0002 §8）：crossNodeSafe=false——SQLite 仅同机多进程安全，
@@ -33,9 +47,16 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
   private stmts: {
     get: ReturnType<DatabaseSyncType["prepare"]>;
     insert: ReturnType<DatabaseSyncType["prepare"]>;
+    /** 条件插入：所有权行有效才插入（ADR 0002 I1）——owner+epoch 成对 / 仅 epoch 两种形态 */
+    insertFencedPair: ReturnType<DatabaseSyncType["prepare"]>;
+    insertFencedToken: ReturnType<DatabaseSyncType["prepare"]>;
     update: ReturnType<DatabaseSyncType["prepare"]>;
-    updateFenced: ReturnType<DatabaseSyncType["prepare"]>;
+    /** 严格 fencing CAS 写（ADR 0002 I3）：EXISTS(有效所有权)，行缺失/租约过期均拒绝 */
+    updateFencedPair: ReturnType<DatabaseSyncType["prepare"]>;
+    updateFencedToken: ReturnType<DatabaseSyncType["prepare"]>;
     del: ReturnType<DatabaseSyncType["prepare"]>;
+    deleteFencedPair: ReturnType<DatabaseSyncType["prepare"]>;
+    deleteFencedToken: ReturnType<DatabaseSyncType["prepare"]>;
     ownGet: ReturnType<DatabaseSyncType["prepare"]>;
     ownInsert: ReturnType<DatabaseSyncType["prepare"]>;
     ownRenew: ReturnType<DatabaseSyncType["prepare"]>;
@@ -81,21 +102,48 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
       insert: this.db.prepare(
         "INSERT INTO props (namespace, role_id, stage_name, props_json, revision, schema_version) VALUES (?, ?, ?, ?, 1, ?)",
       ),
+      insertFencedPair: this.db.prepare(`
+        INSERT INTO props (namespace, role_id, stage_name, props_json, revision, schema_version)
+        SELECT ?, ?, ?, ?, 1, ?
+        WHERE ${ownershipExistsSql("o", true)}
+      `),
+      insertFencedToken: this.db.prepare(`
+        INSERT INTO props (namespace, role_id, stage_name, props_json, revision, schema_version)
+        SELECT ?, ?, ?, ?, 1, ?
+        WHERE ${ownershipExistsSql("o", false)}
+      `),
       update: this.db.prepare(
         "UPDATE props SET props_json = ?, revision = revision + 1, schema_version = ? WHERE namespace = ? AND role_id = ? AND stage_name = ? AND revision = ?",
       ),
-      updateFenced: this.db.prepare(`
+      updateFencedPair: this.db.prepare(`
         UPDATE props SET props_json = ?, revision = revision + 1, schema_version = ?
         WHERE namespace = ? AND role_id = ? AND stage_name = ? AND revision = ?
-          AND NOT EXISTS (
+          AND EXISTS (
             SELECT 1 FROM ownership o
             WHERE o.namespace = props.namespace AND o.role_id = props.role_id AND o.stage_name = props.stage_name
-              AND o.epoch > ?
+              AND o.owner_id = ? AND o.epoch = ? AND o.lease_until > ${SQLITE_DB_NOW_MS}
+          )
+      `),
+      updateFencedToken: this.db.prepare(`
+        UPDATE props SET props_json = ?, revision = revision + 1, schema_version = ?
+        WHERE namespace = ? AND role_id = ? AND stage_name = ? AND revision = ?
+          AND EXISTS (
+            SELECT 1 FROM ownership o
+            WHERE o.namespace = props.namespace AND o.role_id = props.role_id AND o.stage_name = props.stage_name
+              AND o.epoch = ? AND o.lease_until > ${SQLITE_DB_NOW_MS}
           )
       `),
       del: this.db.prepare(
         "DELETE FROM props WHERE namespace = ? AND role_id = ? AND stage_name = ?",
       ),
+      deleteFencedPair: this.db.prepare(`
+        DELETE FROM props WHERE namespace = ? AND role_id = ? AND stage_name = ?
+          AND ${ownershipExistsSql("o", true)}
+      `),
+      deleteFencedToken: this.db.prepare(`
+        DELETE FROM props WHERE namespace = ? AND role_id = ? AND stage_name = ?
+          AND ${ownershipExistsSql("o", false)}
+      `),
       ownGet: this.db.prepare(
         "SELECT owner_id, epoch, lease_until FROM ownership WHERE namespace = ? AND role_id = ? AND stage_name = ?",
       ),
@@ -128,6 +176,47 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
     };
   }
 
+  /** fencing 参数形态：owner+epoch 成对（严格）/ 仅 epoch（过渡兼容，StageManager P0-5 起成对） */
+  private fencedMode(opts: { fencingToken?: number; fencingOwner?: string } | undefined):
+    | "pair"
+    | "token"
+    | null {
+    if (!opts || opts.fencingToken === undefined) return null;
+    return opts.fencingOwner !== undefined ? "pair" : "token";
+  }
+
+  /**
+   * fencing 失败分类（ADR 0002 §7）：行缺失 / owner+epoch 不匹配 → "fencing"；
+   * 行匹配但租约过期（存储时钟判定）→ "lease-expired"。
+   */
+  private rejectFencing(
+    namespace: string,
+    roleId: string,
+    stageName: string,
+    token: number,
+  ): never {
+    const own = this.stmts!.ownGet.get(namespace, roleId, stageName) as
+      | { owner_id: string; epoch: number; lease_until: number }
+      | undefined;
+    if (!own) {
+      throw new ConflictError(
+        `fencing 拒绝：所有权行缺失（${namespace}/${roleId}/${stageName}，token=${token}）——不能放行无所有者的写入（ADR 0002 I3）`,
+        "fencing",
+      );
+    }
+    const nowMs = Date.now(); // SQLite 存储时钟与本地同源（仅同机部署）
+    if (Number(own.lease_until) <= nowMs) {
+      throw new ConflictError(
+        `fencing 拒绝：租约已过期（epoch=${own.epoch}，owner=${own.owner_id}，lease_until=${own.lease_until} <= now=${nowMs}）——持有资格失效（ADR 0002 I3）`,
+        "lease-expired",
+      );
+    }
+    throw new ConflictError(
+      `fencing 拒绝：所有权 epoch=${own.epoch}（owner=${own.owner_id}）与写入 token=${token} 不匹配——旧持有者的写入被拒（ADR 0002 I3）`,
+      "fencing",
+    );
+  }
+
   async create(
     namespace: string,
     roleId: string,
@@ -137,13 +226,42 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
     opts?: CreateOptions,
   ): Promise<StoredProps> {
     this.ensure();
-    try {
-      this.stmts!.insert.run(namespace, roleId, stageName, JSON.stringify(props), schemaVersion);
-    } catch (e) {
-      if (isUniqueViolation(e)) {
-        throw new ConflictError(`记录已存在：${namespace}/${roleId}/${stageName}`, "exists");
+    const mode = this.fencedMode(opts);
+    const payload = JSON.stringify(props);
+    if (mode === null) {
+      try {
+        this.stmts!.insert.run(namespace, roleId, stageName, payload, schemaVersion);
+      } catch (e) {
+        if (isUniqueViolation(e)) {
+          throw new ConflictError(`记录已存在：${namespace}/${roleId}/${stageName}`, "exists");
+        }
+        throw e;
       }
-      throw e;
+      return { props, revision: 1, schemaVersion };
+    }
+    // 条件插入（ADR 0002 I1）：所有权行有效才允许；失败必须分类（行缺失≠放行）
+    const changes =
+      mode === "pair"
+        ? this.stmts!.insertFencedPair.run(
+            namespace, roleId, stageName, payload, schemaVersion,
+            namespace, roleId, stageName, opts!.fencingOwner!, opts!.fencingToken!,
+          ).changes
+        : this.stmts!.insertFencedToken.run(
+            namespace, roleId, stageName, payload, schemaVersion,
+            namespace, roleId, stageName, opts!.fencingToken!,
+          ).changes;
+    if (changes === 0) {
+      // 所有权无效 或 props 行已存在——先分类所有权，再判定 exists
+      const own = this.stmts!.ownGet.get(namespace, roleId, stageName) as
+        | { owner_id: string; epoch: number; lease_until: number }
+        | undefined;
+      const valid =
+        own !== undefined &&
+        (mode === "token" || own.owner_id === opts!.fencingOwner) &&
+        Number(own.epoch) === opts!.fencingToken &&
+        Number(own.lease_until) > Date.now();
+      if (!valid) this.rejectFencing(namespace, roleId, stageName, opts!.fencingToken!);
+      throw new ConflictError(`记录已存在：${namespace}/${roleId}/${stageName}`, "exists");
     }
     return { props, revision: 1, schemaVersion };
   }
@@ -156,36 +274,34 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
     opts: WriteOptions,
   ): Promise<StoredProps> {
     this.ensure();
+    const mode = this.fencedMode(opts);
+    const payload = JSON.stringify(props);
     const changes =
-      opts.fencingToken !== undefined
-        ? this.stmts!.updateFenced.run(
-            JSON.stringify(props),
-            opts.schemaVersion,
-            namespace,
-            roleId,
-            stageName,
-            opts.expectedRevision,
-            opts.fencingToken,
+      mode === "pair"
+        ? this.stmts!.updateFencedPair.run(
+            payload, opts.schemaVersion, namespace, roleId, stageName, opts.expectedRevision,
+            opts.fencingOwner!, opts.fencingToken!,
           ).changes
-        : this.stmts!.update.run(
-            JSON.stringify(props),
-            opts.schemaVersion,
-            namespace,
-            roleId,
-            stageName,
-            opts.expectedRevision,
-          ).changes;
+        : mode === "token"
+          ? this.stmts!.updateFencedToken.run(
+              payload, opts.schemaVersion, namespace, roleId, stageName, opts.expectedRevision,
+              opts.fencingToken!,
+            ).changes
+          : this.stmts!.update.run(
+              payload, opts.schemaVersion, namespace, roleId, stageName, opts.expectedRevision,
+            ).changes;
     if (changes === 0) {
-      if (opts.fencingToken !== undefined) {
+      // 分类顺序（ADR 0002 §7）：资格失败（fencing/lease-expired）优先于 revision 冲突
+      if (mode !== null) {
         const own = this.stmts!.ownGet.get(namespace, roleId, stageName) as
-          | { owner_id: string; epoch: number }
+          | { owner_id: string; epoch: number; lease_until: number }
           | undefined;
-        if (own && own.epoch > opts.fencingToken) {
-          throw new ConflictError(
-            `fencing 拒绝：所有权 epoch=${own.epoch}（owner=${own.owner_id}）> 写入 token=${opts.fencingToken}——旧持有者的写入被拒（DESIGN §6.5）`,
-            "revision",
-          );
-        }
+        const valid =
+          own !== undefined &&
+          (mode === "token" || own.owner_id === opts.fencingOwner) &&
+          Number(own.epoch) === opts.fencingToken &&
+          Number(own.lease_until) > Date.now();
+        if (!valid) this.rejectFencing(namespace, roleId, stageName, opts.fencingToken!);
       }
       const row = this.stmts!.get.get(namespace, roleId, stageName) as
         | { revision: number }
@@ -208,10 +324,25 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
     namespace: string,
     roleId: string,
     stageName: string,
-    _opts?: { fencingToken?: number; fencingOwner?: string },
+    opts?: { fencingToken?: number; fencingOwner?: string },
   ): Promise<void> {
     this.ensure();
-    this.stmts!.del.run(namespace, roleId, stageName);
+    const mode = this.fencedMode(opts);
+    if (mode === null) {
+      this.stmts!.del.run(namespace, roleId, stageName);
+      return;
+    }
+    const changes =
+      mode === "pair"
+        ? this.stmts!.deleteFencedPair.run(
+            namespace, roleId, stageName,
+            namespace, roleId, stageName, opts!.fencingOwner!, opts!.fencingToken!,
+          ).changes
+        : this.stmts!.deleteFencedToken.run(
+            namespace, roleId, stageName,
+            namespace, roleId, stageName, opts!.fencingToken!,
+          ).changes;
+    if (changes === 0) this.rejectFencing(namespace, roleId, stageName, opts!.fencingToken!);
   }
 
   // ---- 所有权（DESIGN §6.5，M3）----

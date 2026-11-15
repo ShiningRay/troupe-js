@@ -8,13 +8,15 @@ export class TroupeError extends Error {
 }
 
 /**
- * 存储冲突（DESIGN §7.2 CAS 合同）。
- * kind="exists"：create 时记录已存在；kind="revision"：write 时期望 revision 不匹配或记录缺失。
+ * 存储冲突（DESIGN §7.2 CAS 合同；fencing 分类见 ADR 0002 §7）。
+ * kind="exists"：create 时记录已存在；kind="revision"：write 时期望 revision 不匹配或记录缺失；
+ * kind="fencing"：所有权行缺失 / owner 不匹配 / epoch 不匹配；
+ * kind="lease-expired"：所有权行匹配但租约已过期（存储时钟判定）。
  */
 export class ConflictError extends TroupeError {
   constructor(
     message: string,
-    readonly kind: "exists" | "revision",
+    readonly kind: "exists" | "revision" | "fencing" | "lease-expired",
   ) {
     super(message);
   }
