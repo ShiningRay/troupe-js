@@ -13,6 +13,7 @@ export { type StoreCapabilities } from "./props/capabilities.js";
 export { InMemoryPropStore } from "./props/memory.js";
 export { SqlitePropStore } from "./props/sqlite.js";
 export { isOwnershipStore, type OwnershipStore, type OwnershipRecord, type AcquireResult } from "./props/ownership.js";
+export { isDirectoryStore, type DirectoryStore, type DirectoryRecord, type DirectoryClaimResult, type DirectoryStatus } from "./props/directory.js";
 export { type CueStore, type ReminderRecord, type ReminderSpec, type ReminderKey } from "./cues/cue-store.js";
 export { InMemoryCueStore } from "./cues/memory.js";
 export { SqliteCueStore } from "./cues/sqlite.js";

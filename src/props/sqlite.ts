@@ -6,6 +6,7 @@ import { ConflictError } from "../core/errors.js";
 import type { StoreCapabilities } from "./capabilities.js";
 import type { CreateOptions, PropStore, StoredProps, WriteOptions } from "./prop-store.js";
 import type { AcquireResult, OwnershipRecord, OwnershipStore } from "./ownership.js";
+import type { DirectoryClaimResult, DirectoryRecord, DirectoryStore } from "./directory.js";
 
 // vitest/vite 尚不识别 node:sqlite 内建，改为运行时 require（类型仍静态检查）
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
@@ -32,11 +33,13 @@ function ownershipExistsSql(alias: string, withOwner: boolean): string {
  * - WAL + busy_timeout：支持同机多进程共享库文件（M3 所有权场景）
  * - create/write 以单条语句原子实现 CAS 合同；fencing 在同一语句内校验所有权行（ADR 0002 I1/I3）
  * - 附带所有权表（M3）：acquire/renew/顶替/释放均为单语句原子操作
+ * - 目录化所有权（ADR 0004，P1-2）：ownership 表扩展 version/status（PRAGMA 检测迁移），
+ *   实现 DirectoryStore——同机范围内路由权威
  *
  * capabilities（ADR 0002 §8）：crossNodeSafe=false——SQLite 仅同机多进程安全，
  * 跨主机共享盘的锁语义不成立；production 门禁（P0-6）据此拒绝，allowUnsafeProviders 显式豁免。
  */
-export class SqlitePropStore implements PropStore, OwnershipStore {
+export class SqlitePropStore implements PropStore, OwnershipStore, DirectoryStore {
   readonly capabilities: StoreCapabilities = {
     crossNodeSafe: false,
     supportsFencing: true,
@@ -95,6 +98,16 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
         PRIMARY KEY (namespace, role_id, stage_name)
       );
     `);
+    // 目录化所有权迁移（ADR 0004，P1-2）：对旧库补 version/status 列（PRAGMA 检测，幂等）
+    const cols = (this.db.prepare("PRAGMA table_info(ownership)").all() as Array<{ name: string }>).map(
+      (c) => c.name,
+    );
+    if (!cols.includes("version")) {
+      this.db.exec("ALTER TABLE ownership ADD COLUMN version INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!cols.includes("status")) {
+      this.db.exec("ALTER TABLE ownership ADD COLUMN status TEXT NOT NULL DEFAULT 'active';");
+    }
     this.stmts = {
       get: this.db.prepare(
         "SELECT props_json, revision, schema_version FROM props WHERE namespace = ? AND role_id = ? AND stage_name = ?",
@@ -145,20 +158,22 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
           AND ${ownershipExistsSql("o", false)}
       `),
       ownGet: this.db.prepare(
-        "SELECT owner_id, epoch, lease_until FROM ownership WHERE namespace = ? AND role_id = ? AND stage_name = ?",
+        "SELECT owner_id, epoch, lease_until, version, status FROM ownership WHERE namespace = ? AND role_id = ? AND stage_name = ?",
       ),
       ownInsert: this.db.prepare(
-        "INSERT INTO ownership (namespace, role_id, stage_name, owner_id, epoch, lease_until) VALUES (?, ?, ?, ?, 1, ?)",
+        "INSERT INTO ownership (namespace, role_id, stage_name, owner_id, epoch, lease_until, version, status) VALUES (?, ?, ?, ?, 1, ?, 1, 'active')",
       ),
       ownRenew: this.db.prepare(
-        "UPDATE ownership SET lease_until = ? WHERE namespace = ? AND role_id = ? AND stage_name = ? AND owner_id = ? AND epoch = ?",
+        // 续租：epoch 不变；version+1（目录变更驱动缓存失效，ADR 0004 §3）
+        "UPDATE ownership SET lease_until = ?, status = 'active', version = version + 1 WHERE namespace = ? AND role_id = ? AND stage_name = ? AND owner_id = ? AND epoch = ?",
       ),
       ownTakeover: this.db.prepare(
-        "UPDATE ownership SET owner_id = ?, epoch = epoch + 1, lease_until = ? WHERE namespace = ? AND role_id = ? AND stage_name = ? AND lease_until <= ?",
+        // 顶替过期租约（含 tombstone/释放态）：epoch+1、version+1
+        "UPDATE ownership SET owner_id = ?, epoch = epoch + 1, lease_until = ?, status = 'active', version = version + 1 WHERE namespace = ? AND role_id = ? AND stage_name = ? AND lease_until <= ?",
       ),
       ownRelease: this.db.prepare(
-        // 不删行：置空租约即可——epoch 必须跨释放单调（否则旧持有者的 token 可通过 fencing）
-        "UPDATE ownership SET lease_until = 0 WHERE namespace = ? AND role_id = ? AND stage_name = ? AND owner_id = ? AND epoch = ?",
+        // 不删行：置空租约 + draining——epoch 必须跨释放单调（否则旧持有者的 token 可通过 fencing）；version+1
+        "UPDATE ownership SET lease_until = 0, status = 'draining', version = version + 1 WHERE namespace = ? AND role_id = ? AND stage_name = ? AND owner_id = ? AND epoch = ?",
       ),
     };
   }
@@ -345,8 +360,80 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
     if (changes === 0) this.rejectFencing(namespace, roleId, stageName, opts!.fencingToken!);
   }
 
-  // ---- 所有权（DESIGN §6.5，M3）----
+  // ---- 所有权（DESIGN §6.5，M3）与目录（ADR 0004，P1-2）----
 
+  private rowToRecord(row: {
+    namespace?: string;
+    role_id?: string;
+    stage_name?: string;
+    owner_id: string;
+    epoch: number;
+    lease_until: number;
+    version: number;
+    status: string;
+  }, fallback: { namespace: string; roleId: string; stageName: string }): DirectoryRecord {
+    return {
+      namespace: row.namespace ?? fallback.namespace,
+      roleId: row.role_id ?? fallback.roleId,
+      stageName: row.stage_name ?? fallback.stageName,
+      ownerId: row.owner_id,
+      epoch: Number(row.epoch),
+      leaseUntil: Number(row.lease_until),
+      version: Number(row.version),
+      status: row.status as DirectoryRecord["status"],
+    };
+  }
+
+  /** 目录 claim（原 acquire 语义 + version 单调 + status 维护；tombstone 租约为 0 → 可顶替重建） */
+  async claim(
+    namespace: string,
+    roleId: string,
+    stageName: string,
+    ownerId: string,
+    leaseMs: number,
+  ): Promise<DirectoryClaimResult> {
+    this.ensure();
+    const now = Date.now();
+    const until = now + leaseMs;
+    const row = this.stmts!.ownGet.get(namespace, roleId, stageName) as
+      | { owner_id: string; epoch: number; lease_until: number; version: number; status: string }
+      | undefined;
+    if (!row) {
+      try {
+        this.stmts!.ownInsert.run(namespace, roleId, stageName, ownerId, until);
+        return { ok: true, epoch: 1, leaseUntil: until, version: 1 };
+      } catch (e) {
+        if (!isUniqueViolation(e)) throw e;
+        // 并发抢占落败：走下面的续租/顶替路径
+      }
+    } else if (row.owner_id === ownerId) {
+      // 续租：epoch 不变；version+1（目录变更）
+      const c = this.stmts!.ownRenew.run(until, namespace, roleId, stageName, ownerId, row.epoch).changes;
+      if (c === 1) return { ok: true, epoch: row.epoch, leaseUntil: until, version: Number(row.version) + 1 };
+    }
+    // 顶替过期租约（含 tombstone/释放态）：epoch + 1（fencing token 单调递增），version+1
+    const c = this.stmts!.ownTakeover.run(ownerId, until, namespace, roleId, stageName, now).changes;
+    if (c === 1) {
+      const fresh = this.stmts!.ownGet.get(namespace, roleId, stageName) as {
+        epoch: number;
+        version: number;
+      };
+      return { ok: true, epoch: Number(fresh.epoch), leaseUntil: until, version: Number(fresh.version) };
+    }
+    const holder = (this.stmts!.ownGet.get(namespace, roleId, stageName) as {
+      owner_id: string;
+      epoch: number;
+      lease_until: number;
+      version: number;
+      status: string;
+    })!;
+    return {
+      ok: false,
+      holder: this.rowToRecord(holder, { namespace, roleId, stageName }),
+    };
+  }
+
+  /** OwnershipStore 兼容层：委托 claim（不带 version） */
   async acquire(
     namespace: string,
     roleId: string,
@@ -354,37 +441,22 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
     ownerId: string,
     leaseMs: number,
   ): Promise<AcquireResult> {
+    const r = await this.claim(namespace, roleId, stageName, ownerId, leaseMs);
+    if (r.ok) return { ok: true, epoch: r.epoch, leaseUntil: r.leaseUntil };
+    const { namespace: _n, roleId: _r, stageName: _s, version: _v, status: _st, ...holder } = r.holder;
+    return { ok: false, holder };
+  }
+
+  async lookup(
+    namespace: string,
+    roleId: string,
+    stageName: string,
+  ): Promise<DirectoryRecord | null> {
     this.ensure();
-    const now = Date.now();
-    const until = now + leaseMs;
     const row = this.stmts!.ownGet.get(namespace, roleId, stageName) as
-      | { owner_id: string; epoch: number; lease_until: number }
+      | { owner_id: string; epoch: number; lease_until: number; version: number; status: string }
       | undefined;
-    if (!row) {
-      try {
-        this.stmts!.ownInsert.run(namespace, roleId, stageName, ownerId, until);
-        return { ok: true, epoch: 1, leaseUntil: until };
-      } catch (e) {
-        if (!isUniqueViolation(e)) throw e;
-        // 并发抢占落败：走下面的续租/顶替路径
-      }
-    } else if (row.owner_id === ownerId) {
-      // 续租：epoch 不变
-      const c = this.stmts!.ownRenew.run(until, namespace, roleId, stageName, ownerId, row.epoch).changes;
-      if (c === 1) return { ok: true, epoch: row.epoch, leaseUntil: until };
-    }
-    // 顶替过期租约：epoch + 1（fencing token 单调递增）
-    const c = this.stmts!.ownTakeover.run(ownerId, until, namespace, roleId, stageName, now).changes;
-    if (c === 1) {
-      const fresh = this.stmts!.ownGet.get(namespace, roleId, stageName) as { epoch: number };
-      return { ok: true, epoch: Number(fresh.epoch), leaseUntil: until };
-    }
-    const holder = (this.stmts!.ownGet.get(namespace, roleId, stageName) as {
-      owner_id: string;
-      epoch: number;
-      lease_until: number;
-    })!;
-    return { ok: false, holder: { ownerId: holder.owner_id, epoch: Number(holder.epoch), leaseUntil: Number(holder.lease_until) } };
+    return row ? this.rowToRecord(row, { namespace, roleId, stageName }) : null;
   }
 
   async readOwnership(
@@ -392,13 +464,9 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
     roleId: string,
     stageName: string,
   ): Promise<OwnershipRecord | null> {
-    this.ensure();
-    const row = this.stmts!.ownGet.get(namespace, roleId, stageName) as
-      | { owner_id: string; epoch: number; lease_until: number }
-      | undefined;
-    return row
-      ? { ownerId: row.owner_id, epoch: Number(row.epoch), leaseUntil: Number(row.lease_until) }
-      : null;
+    const rec = await this.lookup(namespace, roleId, stageName);
+    if (!rec) return null;
+    return { ownerId: rec.ownerId, epoch: rec.epoch, leaseUntil: rec.leaseUntil };
   }
 
   async release(
@@ -409,7 +477,33 @@ export class SqlitePropStore implements PropStore, OwnershipStore {
     epoch: number,
   ): Promise<boolean> {
     this.ensure();
+    // 不删行：置空租约 + draining（交接/停服语义）——epoch 跨释放单调，version 推进缓存失效
     return this.stmts!.ownRelease.run(namespace, roleId, stageName, ownerId, epoch).changes === 1;
+  }
+
+  async bumpVersion(namespace: string, roleId: string, stageName: string): Promise<number | null> {
+    this.ensure();
+    const rows = this.db!.prepare(
+      "UPDATE ownership SET version = version + 1 WHERE namespace = ? AND role_id = ? AND stage_name = ? RETURNING version",
+    ).all(namespace, roleId, stageName) as Array<{ version: number }>;
+    return rows.length > 0 ? Number(rows[0].version) : null;
+  }
+
+  async listOwned(ownerIdPrefix: string): Promise<DirectoryRecord[]> {
+    this.ensure();
+    const rows = this.db!.prepare(
+      "SELECT namespace, role_id, stage_name, owner_id, epoch, lease_until, version, status FROM ownership WHERE owner_id LIKE ? || '#%'",
+    ).all(`${ownerIdPrefix}`) as Array<{
+      namespace: string;
+      role_id: string;
+      stage_name: string;
+      owner_id: string;
+      epoch: number;
+      lease_until: number;
+      version: number;
+      status: string;
+    }>;
+    return rows.map((row) => this.rowToRecord(row, { namespace: row.namespace, roleId: row.role_id, stageName: row.stage_name }));
   }
 }
 

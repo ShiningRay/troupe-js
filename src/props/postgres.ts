@@ -2,6 +2,11 @@ import { ConflictError } from "../core/errors.js";
 import type { StoreCapabilities } from "./capabilities.js";
 import type { CreateOptions, PropStore, StoredProps, WriteOptions } from "./prop-store.js";
 import type { AcquireResult, OwnershipRecord, OwnershipStore } from "./ownership.js";
+import type {
+  DirectoryClaimResult,
+  DirectoryRecord,
+  DirectoryStore,
+} from "./directory.js";
 // pg 为可选 peer 依赖：仅在选用 PostgresPropStore 时需要安装（PLAN §5）
 import { Pool, type PoolClient } from "pg";
 
@@ -14,11 +19,13 @@ const PG_DB_NOW_MS = "(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint";
  * - fencing（ADR 0002 I1/I3）：create/write/delete 在同一原子语句内校验所有权行
  *   `owner_id + epoch + lease_until > 存储时钟`；行缺失 = 拒绝（不再 NOT EXISTS 放行）
  * - 所有权 acquire/续租/顶替/释放均为单语句原子操作（依赖行锁），租约边界以 PG 时钟为准
+ * - 目录化所有权（ADR 0004，P1-2）：ownership 表扩展 version/status 列（自动迁移），
+ *   实现 DirectoryStore——路由权威，version 单调
  * 选择：Troupe.form({ propStore: new PostgresPropStore("postgres://…") })
  *
  * capabilities（ADR 0002 §8）：跨节点安全 + 支持 fencing（P0 唯一满足 production 门禁的 Provider）。
  */
-export class PostgresPropStore implements PropStore, OwnershipStore {
+export class PostgresPropStore implements PropStore, OwnershipStore, DirectoryStore {
   readonly capabilities: StoreCapabilities = {
     crossNodeSafe: true,
     supportsFencing: true,
@@ -56,6 +63,9 @@ export class PostgresPropStore implements PropStore, OwnershipStore {
             lease_until BIGINT NOT NULL,
             PRIMARY KEY (namespace, role_id, stage_name)
           );
+          -- 目录化所有权迁移（ADR 0004，P1-2）：version 单调 + status；对旧库幂等
+          ALTER TABLE ${this.schema}.ownership ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;
+          ALTER TABLE ${this.schema}.ownership ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
         `);
       });
     }
@@ -318,21 +328,22 @@ export class PostgresPropStore implements PropStore, OwnershipStore {
     }
   }
 
-  // ---- 所有权（DESIGN §6.5，M3）----
+  // ---- 所有权（DESIGN §6.5，M3）与目录（ADR 0004，P1-2）----
 
-  async acquire(
+  /** 目录 claim（原 acquire 语义 + version 单调 + status 维护；tombstone 可重建） */
+  async claim(
     namespace: string,
     roleId: string,
     stageName: string,
     ownerId: string,
     leaseMs: number,
-  ): Promise<AcquireResult> {
+  ): Promise<DirectoryClaimResult> {
     const c = await this.client();
     try {
-      // 单语句原子：插入或（过期顶替 epoch+1 / 本人续租）；租约边界以 PG 时钟为准（ADR 0002 §5）
+      // 单语句原子：插入或（过期顶替 epoch+1 / 本人续租 / tombstone 重建）；租约边界以 PG 时钟为准
       const r = await c.query(
-        `INSERT INTO ${this.q("ownership")} (namespace, role_id, stage_name, owner_id, epoch, lease_until)
-         VALUES ($1, $2, $3, $4, 1, ${PG_DB_NOW_MS} + $5)
+        `INSERT INTO ${this.q("ownership")} (namespace, role_id, stage_name, owner_id, epoch, lease_until, version, status)
+         VALUES ($1, $2, $3, $4, 1, ${PG_DB_NOW_MS} + $5, 1, 'active')
          ON CONFLICT (namespace, role_id, stage_name) DO UPDATE SET
            owner_id = CASE WHEN ${this.q("ownership")}.owner_id = EXCLUDED.owner_id
                            OR ${this.q("ownership")}.lease_until <= ${PG_DB_NOW_MS}
@@ -345,17 +356,90 @@ export class PostgresPropStore implements PropStore, OwnershipStore {
            lease_until = CASE WHEN ${this.q("ownership")}.owner_id = EXCLUDED.owner_id
                                  OR ${this.q("ownership")}.lease_until <= ${PG_DB_NOW_MS}
                             THEN EXCLUDED.lease_until
-                            ELSE ${this.q("ownership")}.lease_until END
-         RETURNING owner_id, epoch, lease_until`,
+                            ELSE ${this.q("ownership")}.lease_until END,
+           status = CASE WHEN ${this.q("ownership")}.lease_until <= ${PG_DB_NOW_MS}
+                              OR ${this.q("ownership")}.owner_id = EXCLUDED.owner_id
+                         THEN 'active' ELSE ${this.q("ownership")}.status END,
+           version = ${this.q("ownership")}.version + 1
+         RETURNING owner_id, epoch, lease_until, version, status`,
         [namespace, roleId, stageName, ownerId, leaseMs],
       );
-      const row = r.rows[0] as { owner_id: string; epoch: string; lease_until: string };
+      const row = r.rows[0] as {
+        owner_id: string;
+        epoch: string;
+        lease_until: string;
+        version: string;
+        status: string;
+      };
       if (row.owner_id === ownerId) {
-        return { ok: true, epoch: Number(row.epoch), leaseUntil: Number(row.lease_until) };
+        return {
+          ok: true,
+          epoch: Number(row.epoch),
+          leaseUntil: Number(row.lease_until),
+          version: Number(row.version),
+        };
       }
       return {
         ok: false,
-        holder: { ownerId: row.owner_id, epoch: Number(row.epoch), leaseUntil: Number(row.lease_until) },
+        holder: {
+          namespace,
+          roleId,
+          stageName,
+          ownerId: row.owner_id,
+          epoch: Number(row.epoch),
+          leaseUntil: Number(row.lease_until),
+          version: Number(row.version),
+          status: row.status as DirectoryRecord["status"],
+        },
+      };
+    } finally {
+      c.release();
+    }
+  }
+
+  /** OwnershipStore 兼容层：委托 claim（不带 version） */
+  async acquire(
+    namespace: string,
+    roleId: string,
+    stageName: string,
+    ownerId: string,
+    leaseMs: number,
+  ): Promise<AcquireResult> {
+    const r = await this.claim(namespace, roleId, stageName, ownerId, leaseMs);
+    if (r.ok) return { ok: true, epoch: r.epoch, leaseUntil: r.leaseUntil };
+    const { namespace: _n, roleId: _r, stageName: _s, ...holder } = r.holder;
+    return { ok: false, holder };
+  }
+
+  async lookup(
+    namespace: string,
+    roleId: string,
+    stageName: string,
+  ): Promise<DirectoryRecord | null> {
+    const c = await this.client();
+    try {
+      const r = await c.query(
+        `SELECT owner_id, epoch, lease_until, version, status FROM ${this.q("ownership")}
+         WHERE namespace = $1 AND role_id = $2 AND stage_name = $3`,
+        [namespace, roleId, stageName],
+      );
+      if (r.rows.length === 0) return null;
+      const row = r.rows[0] as {
+        owner_id: string;
+        epoch: string;
+        lease_until: string;
+        version: string;
+        status: string;
+      };
+      return {
+        namespace,
+        roleId,
+        stageName,
+        ownerId: row.owner_id,
+        epoch: Number(row.epoch),
+        leaseUntil: Number(row.lease_until),
+        version: Number(row.version),
+        status: row.status as DirectoryRecord["status"],
       };
     } finally {
       c.release();
@@ -367,19 +451,9 @@ export class PostgresPropStore implements PropStore, OwnershipStore {
     roleId: string,
     stageName: string,
   ): Promise<OwnershipRecord | null> {
-    const c = await this.client();
-    try {
-      const r = await c.query(
-        `SELECT owner_id, epoch, lease_until FROM ${this.q("ownership")}
-         WHERE namespace = $1 AND role_id = $2 AND stage_name = $3`,
-        [namespace, roleId, stageName],
-      );
-      if (r.rows.length === 0) return null;
-      const row = r.rows[0] as { owner_id: string; epoch: string; lease_until: string };
-      return { ownerId: row.owner_id, epoch: Number(row.epoch), leaseUntil: Number(row.lease_until) };
-    } finally {
-      c.release();
-    }
+    const rec = await this.lookup(namespace, roleId, stageName);
+    if (!rec) return null;
+    return { ownerId: rec.ownerId, epoch: rec.epoch, leaseUntil: rec.leaseUntil };
   }
 
   async release(
@@ -391,13 +465,53 @@ export class PostgresPropStore implements PropStore, OwnershipStore {
   ): Promise<boolean> {
     const c = await this.client();
     try {
-      // 不删行：置空租约——epoch 必须跨释放单调（否则旧持有者的 token 可通过 fencing）
+      // 不删行：置空租约 + draining（交接/停服语义）——epoch 必须跨释放单调，version 推进缓存失效
       const r = await c.query(
-        `UPDATE ${this.q("ownership")} SET lease_until = 0
+        `UPDATE ${this.q("ownership")} SET lease_until = 0, status = 'draining', version = version + 1
          WHERE namespace = $1 AND role_id = $2 AND stage_name = $3 AND owner_id = $4 AND epoch = $5`,
         [namespace, roleId, stageName, ownerId, epoch],
       );
       return (r.rowCount ?? 0) === 1;
+    } finally {
+      c.release();
+    }
+  }
+
+  async bumpVersion(namespace: string, roleId: string, stageName: string): Promise<number | null> {
+    const c = await this.client();
+    try {
+      const r = await c.query(
+        `UPDATE ${this.q("ownership")} SET version = version + 1
+         WHERE namespace = $1 AND role_id = $2 AND stage_name = $3
+         RETURNING version`,
+        [namespace, roleId, stageName],
+      );
+      if (r.rowCount === 0) return null;
+      return Number((r.rows[0] as { version: string }).version);
+    } finally {
+      c.release();
+    }
+  }
+
+  async listOwned(ownerIdPrefix: string): Promise<DirectoryRecord[]> {
+    const c = await this.client();
+    try {
+      // owner_id = addr#incarnation：按 addr 前缀匹配（重启即新 incarnation，恢复扫描用）
+      const r = await c.query(
+        `SELECT namespace, role_id, stage_name, owner_id, epoch, lease_until, version, status
+         FROM ${this.q("ownership")} WHERE owner_id LIKE $1 || '#%'`,
+        [ownerIdPrefix],
+      );
+      return (r.rows as Array<Record<string, string>>).map((row) => ({
+        namespace: row.namespace,
+        roleId: row.role_id,
+        stageName: row.stage_name,
+        ownerId: row.owner_id,
+        epoch: Number(row.epoch),
+        leaseUntil: Number(row.lease_until),
+        version: Number(row.version),
+        status: row.status as DirectoryRecord["status"],
+      }));
     } finally {
       c.release();
     }
