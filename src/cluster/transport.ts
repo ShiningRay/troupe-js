@@ -1,4 +1,5 @@
 import { connect, createServer, type Server, type Socket } from "node:net";
+import { connect as tlsConnect, createServer as tlsCreateServer, type TlsOptions as NodeTlsOptions } from "node:tls";
 import {
   CallRejectedError,
   TroupeError,
@@ -69,9 +70,9 @@ export type WireMessage =
   | WireResponse
   | WireDirector
   | WireShow
-  | { t: "join"; from: string; inc: number; protocol: number; roles: string[] }
+  | { t: "join"; from: string; inc: number; protocol: number; roles: string[]; token?: string }
   | { t: "join-nack"; from: string; reason: string }
-  | { t: "roster"; from: string; inc: number; members: WireMember[] }
+  | { t: "roster"; from: string; inc: number; members: WireMember[]; protocol?: number }
   | { t: "ping"; from: string; inc: number }
   | { t: "ack"; from: string; inc: number }
   | { t: "leave"; from: string; inc: number };
@@ -84,6 +85,17 @@ export interface TransportOptions {
   /** 每连接未完成请求数上限（客户端） */
   maxPendingPerConn: number;
   connectTimeoutMs: number;
+  /**
+   * TLS（P1-6，ROADMAP）：配置后服务端 tls.createServer、客户端 tls.connect。
+   * cert/key 为 PEM 内容（文件加载由部署方 fs.readFileSync）；ca 供自签名链；
+   * rejectUnauthorized 缺省 true——production 不得关闭（校验失败的连接在握手期被拒）。
+   */
+  tls?: {
+    cert: string;
+    key: string;
+    ca?: string;
+    rejectUnauthorized?: boolean;
+  };
 }
 
 export type ReplyFn = (msg: WireMessage) => void;
@@ -173,7 +185,12 @@ export class Transport {
 
   private tryListen(host: string, port: number): Promise<number | null> {
     return new Promise((resolve) => {
-      const server = createServer((socket) => this.setupServerSocket(socket));
+      const server: Server = this.opts.tls
+        ? tlsCreateServer(
+            { key: this.opts.tls.key, cert: this.opts.tls.cert, ca: this.opts.tls.ca } satisfies NodeTlsOptions,
+            (socket) => this.setupServerSocket(socket),
+          )
+        : createServer((socket) => this.setupServerSocket(socket));
       server.once("error", () => resolve(null));
       server.listen(port, host, () => {
         this.server = server;
@@ -250,7 +267,14 @@ export class Transport {
     const port = Number(portStr);
     const promise = new Promise<Conn>((resolve, reject) => {
       let settled = false;
-      const socket = connect({ host, port });
+      const socket = this.opts.tls
+        ? tlsConnect({
+            host,
+            port,
+            ca: this.opts.tls.ca,
+            rejectUnauthorized: this.opts.tls.rejectUnauthorized ?? true,
+          })
+        : connect({ host, port });
       const conn: Conn = { socket, pending: new Map(), inflight: 0 };
       const fail = (e: unknown) => {
         if (settled) return;
@@ -272,7 +296,10 @@ export class Transport {
           new UnknownOutcomeError(`与 ${addr} 的连接断开：执行结果未知（§6.1），勿假定失败`),
         );
       });
-      socket.on("connect", () => {
+      // TLS 连接必须等 secureConnect（握手完成）；明文连接等 connect。
+      // 提前写帧会在 TLS 握手期发出明文帧 → 对端断开（EPIPE，P1-6 实证）。
+      const readyEvent = this.opts.tls ? "secureConnect" : "connect";
+      socket.on(readyEvent, () => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Actor, CallRejectedError, Troupe } from "../src/index.js";
 import type { TroupeEvent } from "../src/core/events.js";
+import { TEST_TLS_CERT, TEST_TLS_KEY } from "./fixtures/test-tls.js";
 import { SqlitePropStore } from "../src/props/sqlite.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -50,6 +51,9 @@ class OwnCartActor extends Actor<{ items: string[] }> {
 function tmpDir(): string {
   return mkdtempSync(join(tmpdir(), "troupe-m3-"));
 }
+
+/** P1-6 production 测试用的自签 TLS 配置（自签链：证书本身作为 ca 供客户端校验） */
+const TEST_TLS = { cert: TEST_TLS_CERT, key: TEST_TLS_KEY, ca: TEST_TLS_CERT };
 
 interface Stage {
   troupe: Troupe;
@@ -231,6 +235,8 @@ describe("M3 验收：production 部署模式（§6.2/§8.2）", () => {
           port: 7903,
           advertise: "127.0.0.1:7903",
           seeds: ["127.0.0.1:1"], // 不可达
+          tls: TEST_TLS, // P1-6：production 强制 TLS/管理凭证（本测先过安全门禁，聚焦入团）
+          adminToken: "tok-m3",
         },
       }),
     ).rejects.toThrow(/入团失败/);
@@ -243,7 +249,7 @@ describe("M3 验收：production 部署模式（§6.2/§8.2）", () => {
     const seed = await Troupe.form({
       actors: [OwnCartActor],
       propStore: new SqlitePropStore(seedDir),
-      cluster: { port: 0 },
+      cluster: { port: 0, tls: TEST_TLS }, // TLS 集群全成员一致（P1-6）
     });
     await expect(
       Troupe.form({
@@ -254,6 +260,8 @@ describe("M3 验收：production 部署模式（§6.2/§8.2）", () => {
           port: 7904,
           advertise: "127.0.0.1:7904",
           seeds: [seed.clusterAddress()!],
+          tls: TEST_TLS,
+          adminToken: "tok-m3",
         },
       }),
       // P0-6 起门禁前移：crossNodeSafe=false 的 Provider 在 OwnershipStore 检查之前即被拒（ADR 0002 I5）

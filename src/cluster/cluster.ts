@@ -40,9 +40,16 @@ export interface ClusterOptions {
   /**
    * production（M3，§6.2/§8.2）：固定端口（被占即败）、必须 advertiseAddress、
    * 必须成功入团（所有 seed 不可达 → 启动失败）、角色集合不一致拒绝入团。
+   * production 另强制 TLS（tls）与 Director 管理凭证（adminToken 或 TROUPE_ADMIN_TOKEN）——P1-6。
    * 也可经 TROUPE_MODE=production 开启。
    */
   mode?: "dev" | "production";
+  /** TLS（P1-6，ROADMAP）：cert/key 为 PEM 内容，ca 供自签名链；production 必配 */
+  tls?: { cert: string; key: string; ca?: string };
+  /** 入团预共享 token（P1-6）：join 必须携带；缺省读 TROUPE_JOIN_TOKEN */
+  joinToken?: string;
+  /** Director 管理凭证（P1-6）：production 必配（或 TROUPE_ADMIN_TOKEN）；dir 消息未授权拒绝 */
+  adminToken?: string;
 }
 
 /**
@@ -107,7 +114,7 @@ export class Cluster {
       },
     });
     const handler: TransportHandler = (msg, reply) => this.onWire(msg, reply);
-    this.transport = new Transport(handler);
+    this.transport = new Transport(handler, { ...(this.opts.tls ? { tls: this.opts.tls } : {}) });
   }
 
   async start(): Promise<void> {
@@ -119,6 +126,17 @@ export class Cluster {
       }
       if (!this.opts.advertise) {
         throw new TroupeError("production 模式必须显式指定 cluster.advertise（advertiseAddress，§6.2）");
+      }
+      // P1-6 安全门禁（ROADMAP）：production 强制 TLS 与 Director 管理凭证
+      if (!this.opts.tls) {
+        throw new TroupeError(
+          "production 模式必须启用 TLS（cluster.tls：{ cert, key, ca? }，P1-6）——明文线协议不满足生产安全",
+        );
+      }
+      if (!(this.opts.adminToken ?? process.env.TROUPE_ADMIN_TOKEN)) {
+        throw new TroupeError(
+          "production 模式必须配置 Director 管理凭证（cluster.adminToken 或 TROUPE_ADMIN_TOKEN，P1-6）",
+        );
       }
     }
     const preferred = this.opts.port ?? Number(process.env.TROUPE_PORT ?? 7300);
@@ -145,7 +163,10 @@ export class Cluster {
       this.selfAddr,
       (addr, m) => this.transport.send(addr, m),
       [...this.deps.roles.keys()],
-      { protocolVersion: this.opts.protocolVersion ?? WIRE_PROTOCOL_VERSION },
+      {
+        protocolVersion: this.opts.protocolVersion ?? WIRE_PROTOCOL_VERSION,
+        joinToken: this.opts.joinToken ?? process.env.TROUPE_JOIN_TOKEN ?? undefined,
+      },
     );
     this.roster.strictJoinFlag = production;
     this.roster.onMembersChanged = (alive) => {
@@ -243,7 +264,7 @@ export class Cluster {
     bundle: { roleId: string; source: string; className?: string; policy: "swap"; sig: string },
   ): Promise<Array<{ stage: string } & Record<string, unknown>>> {
     const members = [this.selfAddr, ...this.roster?.aliveMembers() ?? []];
-    const token = process.env.TROUPE_ADMIN_TOKEN;
+    const token = this.opts.adminToken ?? process.env.TROUPE_ADMIN_TOKEN;
     const results = await Promise.allSettled(
       members.map(async (addr) => {
         const callId = randomUUID();
@@ -448,7 +469,7 @@ export class Cluster {
       if (typeof msg.method !== "string" || !Array.isArray(msg.args)) {
         throw new CallRejectedError("dir 信封需要 { method, args[] }", "whitelist", false);
       }
-      const expectedToken = process.env.TROUPE_ADMIN_TOKEN;
+      const expectedToken = this.opts.adminToken ?? process.env.TROUPE_ADMIN_TOKEN;
       if (expectedToken && msg.token !== expectedToken) {
         throw new CallRejectedError("Director 访问被拒：token 不匹配（TROUPE_ADMIN_TOKEN，§11.1）", "whitelist", false);
       }

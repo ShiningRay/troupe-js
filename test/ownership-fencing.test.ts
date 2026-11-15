@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { Actor, Troupe } from "../src/index.js";
 import { ConflictError } from "../src/core/errors.js";
 import { unwrapEnvelope } from "../src/core/envelope.js";
+import { TEST_TLS_CERT, TEST_TLS_KEY } from "./fixtures/test-tls.js";
 import type { TroupeEvent } from "../src/core/events.js";
 import type { PropStore, StoredProps, WriteOptions } from "../src/props/prop-store.js";
 import type { AcquireResult, OwnershipRecord, OwnershipStore } from "../src/props/ownership.js";
@@ -328,7 +329,8 @@ describe("反例 F6（ADR I5）：production + SqlitePropStore 启动必须失�
     const seed = await Troupe.form({
       actors: [FencingCart],
       propStore: new SqlitePropStore(dir),
-      cluster: { port: basePort, advertise: `127.0.0.1:${basePort}` },
+      // TLS 集群全成员一致（P1-6）：seed 侧也启用 TLS，production 节点的出站连接才能握手
+      cluster: { port: basePort, advertise: `127.0.0.1:${basePort}`, tls: { cert: TEST_TLS_CERT, key: TEST_TLS_KEY, ca: TEST_TLS_CERT } },
     });
     const seedAddr = `127.0.0.1:${basePort}`;
 
@@ -337,7 +339,14 @@ describe("反例 F6（ADR I5）：production + SqlitePropStore 启动必须失�
       formed = await Troupe.form({
         actors: [FencingCart],
         propStore: new SqlitePropStore(dir),
-        cluster: { mode: "production", port: basePort + 1, advertise: `127.0.0.1:${basePort + 1}`, seeds: [seedAddr] },
+        cluster: {
+          mode: "production",
+          port: basePort + 1,
+          advertise: `127.0.0.1:${basePort + 1}`,
+          seeds: [seedAddr],
+          tls: { cert: TEST_TLS_CERT, key: TEST_TLS_KEY, ca: TEST_TLS_CERT },
+          adminToken: "tok-f6",
+        },
       });
       // 修复前：SQLite 通过 production 检查 → 走到这里 → 红
       expect.fail("production 集群接受了 crossNodeSafe=false 的 SqlitePropStore");
@@ -354,7 +363,14 @@ describe("反例 F6（ADR I5）：production + SqlitePropStore 启动必须失�
       actors: [FencingCart],
       propStore: new SqlitePropStore(dir),
       allowUnsafeProviders: true,
-      cluster: { mode: "production", port: basePort + 2, advertise: `127.0.0.1:${basePort + 2}`, seeds: [seedAddr] },
+      cluster: {
+        mode: "production",
+        port: basePort + 2,
+        advertise: `127.0.0.1:${basePort + 2}`,
+        seeds: [seedAddr],
+        tls: { cert: TEST_TLS_CERT, key: TEST_TLS_KEY, ca: TEST_TLS_CERT },
+        adminToken: "tok-f6",
+      },
       onEvent: (e) => unsafeEvents.push(e),
     });
     try {

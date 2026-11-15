@@ -17,6 +17,11 @@ export interface RosterOptions {
   staleMs: number;
   deadTtlMs: number;
   protocolVersion: number;
+  /**
+   * 入团预共享 token（P1-6，ROADMAP）：配置后 join 必须携带相同 token，否则 nack；
+   * 认证失败按来源地址限速（窗口内超限后静默丢弃，不回包）。
+   */
+  joinToken?: string;
 }
 
 interface MemberState {
@@ -37,6 +42,9 @@ const DEFAULTS: RosterOptions = {
 
 const STATE_RANK: Record<MemberState["state"], number> = { alive: 0, suspect: 1, dead: 2 };
 
+const JOIN_FAIL_WINDOW_MS = 60_000;
+const JOIN_FAIL_LIMIT = 5;
+
 export class Roster {
   private members = new Map<string, MemberState>();
   /** 死亡记录过期清理后的墓碑：addr → 已清理记录的 incarnation。只有更高 incarnation 可重新入册 */
@@ -44,6 +52,8 @@ export class Roster {
   private ring: HashRing;
   private timer: ReturnType<typeof setInterval> | null = null;
   private opts: RosterOptions;
+  /** join 认证失败计数（按来源地址；P1-6 限速） */
+  private joinFails = new Map<string, { count: number; windowStart: number }>();
   /** 当前身份（启动时为时间戳；被误判死亡时抬升反驳，M3） */
   private selfInc = Date.now();
   get selfIncarnation(): number {
@@ -97,6 +107,22 @@ export class Roster {
     }
   }
 
+  /**
+   * join 认证限速（P1-6）：每来源地址在窗口内失败超过 JOIN_FAIL_LIMIT → 静默丢弃后续尝试
+   * （返回 false = 不回包；成功认证后清除计数）。
+   */
+  private allowJoinAttempt(from: string): boolean {
+    const now = Date.now();
+    const rec = this.joinFails.get(from);
+    if (rec && now - rec.windowStart < JOIN_FAIL_WINDOW_MS) {
+      if (rec.count >= JOIN_FAIL_LIMIT) return false;
+      rec.count++;
+      return true;
+    }
+    this.joinFails.set(from, { count: 1, windowStart: now });
+    return true;
+  }
+
   private sendJoin(seed: string, timeoutMs?: number): Promise<true> {
     return new Promise<true>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -111,6 +137,7 @@ export class Roster {
         inc: this.selfIncarnation,
         protocol: this.opts.protocolVersion,
         roles: this.roleIds,
+        ...(this.opts.joinToken !== undefined ? { token: this.opts.joinToken } : {}),
       }).catch((e) => {
         clearTimeout(timer);
         this.pendingJoins.delete(seed);
@@ -124,6 +151,16 @@ export class Roster {
     switch (msg.t) {
       case "join": {
         const production = this.strictJoinFlag;
+        // 入团凭证（P1-6）：配置 token 后不匹配 → nack + 限速；超限静默丢弃
+        if (this.opts.joinToken !== undefined) {
+          if (!this.allowJoinAttempt(msg.from)) {
+            return; // 限速窗口内：不回包（攻击面收敛）
+          }
+          if (msg.token !== this.opts.joinToken) {
+            reply({ t: "join-nack", from: this.selfAddr, reason: `join token 不匹配（来自 ${msg.from}）——拒绝入团（P1-6）` });
+            return;
+          }
+        }
         this.touch(msg.from, msg.inc);
         if (msg.protocol !== this.opts.protocolVersion) {
           reply({ t: "join-nack", from: this.selfAddr, reason: `协议版本不一致：对方=${msg.protocol} 本地=${this.opts.protocolVersion}（§6.2）` });
@@ -136,7 +173,8 @@ export class Roster {
         if (!production && msg.roles.length > 0 && !sameSet(msg.roles, this.roleIds)) {
           console.warn(`[troupe] 角色集合不一致（dev 仅警告）：${msg.from}=${msg.roles.join(",")}，本地=${this.roleIds.join(",")}`);
         }
-        reply(this.rosterMsg());
+        // auth ack 带 protocolVersion（P1-6）：发起方校验一致后才入团
+        reply({ ...this.rosterMsg(), protocol: this.opts.protocolVersion } as WireMessage);
         return;
       }
       case "join-nack": {
@@ -150,6 +188,12 @@ export class Roster {
         return;
       }
       case "roster": {
+        // 入团应答的协议版本校验（P1-6）：不一致忽略该应答（join 会超时重试/失败）
+        if (msg.protocol !== undefined && msg.protocol !== this.opts.protocolVersion) {
+          console.warn(`[troupe] roster 协议版本不一致：对方=${msg.protocol} 本地=${this.opts.protocolVersion}——忽略该应答（P1-6）`);
+          return;
+        }
+        this.joinFails.delete(msg.from); // 认证成功：清除限速计数
         this.touch(msg.from, msg.inc);
         // 反驳规则（§6.2）：被误判者发现自身被判 suspect/dead → 抬升 incarnation 并重新广播身份
         const selfView = msg.members.find((x) => x.addr === this.selfAddr);
