@@ -16,12 +16,15 @@ if (!existsSync(file)) {
 const data = JSON.parse(readFileSync(file, "utf8"));
 const skipped = [];
 const guardSkipped = [];
+const capabilitySkipped = [];
 for (const tr of data.testResults ?? []) {
   for (const a of tr.assertionResults ?? []) {
     if (a.status === "skipped" || a.status === "todo") {
       const entry = `${tr.name ?? tr.file ?? "?"} :: ${a.fullName ?? a.title ?? "?"}`;
       // "PG 门禁"守卫本身不是 PG 用例：URL 已提供时它按设计跳过（见 ownership-fencing.test.ts）
       if (/拒绝静默跳过/.test(a.fullName ?? a.title ?? "")) guardSkipped.push(entry);
+      // 能力感知跳过（ADR 0002 §8）：Provider 声明 supportsFencing=false → fencing 契约不适用
+      else if (/PropStore 合同（InMemoryPropStore）.*fencing/.test(a.fullName ?? a.title ?? "")) capabilitySkipped.push(entry);
       else skipped.push(entry);
     }
   }
@@ -33,6 +36,9 @@ const lines = [
 ];
 if (guardSkipped.length) {
   lines.push("", `门禁守卫按设计跳过（非 PG 用例）：${guardSkipped.length} 项`);
+}
+if (capabilitySkipped.length) {
+  lines.push("", `能力感知跳过（Provider 声明不支持该能力，ADR 0002 §8）：${capabilitySkipped.length} 项`);
 }
 const summary = lines.join("\n");
 console.log(summary);
