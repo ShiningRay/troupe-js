@@ -111,8 +111,14 @@ class ActorSlot {
   lastActivityAt = 0;
   /** 所有权 fencing token（0 = 无所有权/未启用，§6.5） */
   epoch = 0;
-  /** 上次租约续租时间 */
+  /** 上次租约续租时间（本地时钟近似提示，ADR 0002 §5） */
   lastRenewAt = 0;
+  /** 当前租约到期（DB 时钟域；acquire 返回值，ADR 0002 §5） */
+  leaseUntil = 0;
+  /** 租约续期连续失败计数（ADR 0002 I4：达阈值或越过边界 → 停止接单） */
+  renewFailures = 0;
+  /** 续租请求在飞（防挂起存储导致的节拍堆积） */
+  renewPending = false;
   /** 内存 Cue（§3.3）：随实例下场清理 */
   memoryCues = new Map<string, { timer: ReturnType<typeof setInterval>; fn: () => void | Promise<void>; inFlight: boolean }>();
 
@@ -192,19 +198,38 @@ export class StageManager {
     }
   }
 
+  /** 续租失败停止接单的阈值（ADR 0002 I4）：连续失败达到该值即 invalidate */
+  private static readonly RENEW_FAILURE_LIMIT = 2;
+
   private async renewLeases(): Promise<void> {
     const own = this.ownership;
     if (!own || this.closed) return;
     const cadence = Math.max(250, Math.floor(own.leaseMs / 3));
+    // 安全边界（本地时钟近似提示）：越过 leaseUntil - margin 即停止接单，不等下一拍
+    const safetyMargin = Math.max(0, Math.floor(own.leaseMs / 6));
     for (const slot of [...this.slots.values()]) {
       if (slot.epoch === 0 || slot.state !== "running") continue;
+      if (slot.renewPending) continue; // 挂起存储防堆积
+      // 误杀方向安全（ADR 0002 I4）：宁先停服，不冒双活风险
+      if (slot.leaseUntil > 0 && this.now() > slot.leaseUntil - safetyMargin) {
+        this.invalidate(
+          slot,
+          new TroupeError(
+            `租约临近边界且续期未确认（leaseUntil=${slot.leaseUntil}，本地时钟=${this.now()}）——先停止接单，等在飞 settle（ADR 0002 I4）`,
+          ),
+        );
+        continue;
+      }
       if (this.now() - slot.lastRenewAt < cadence) continue;
       slot.lastRenewAt = this.now();
+      slot.renewPending = true;
       try {
         const res = await own.store.acquire(
           this.config.namespace, slot.meta.roleId, slot.stageName,
           own.ownerId, own.leaseMs,
         );
+        // await 期间可能已被下场/失效：只把结果应用到仍在场的同一 slot
+        if (this.slots.get(slot.key) !== slot || slot.state !== "running") continue;
         if (!res.ok) {
           this.events.emit({
             type: "invalidated",
@@ -217,19 +242,34 @@ export class StageManager {
           continue;
         }
         slot.epoch = res.epoch;
+        slot.leaseUntil = res.leaseUntil; // DB 时钟域
+        slot.renewFailures = 0;
         if (!own.isRingOwner(slot.meta.roleId, slot.stageName)) {
           // 环漂移 → 主动交接：排空 → offStage+save → 释放（§6.5 扩容交接）
           void this.drain(slot, "handover");
         }
       } catch (e) {
-        // 存储不可达：不失效（可能是暂时的网络问题），记录事件
+        // 存储不可达（ADR 0002 I4）：不再"仅 warn 继续"——计入指标/事件，累计达阈值即停止接单
+        if (this.slots.get(slot.key) !== slot || slot.state !== "running") continue;
+        slot.renewFailures++;
+        this.metrics.leaseRenewFailed(slot.meta.roleId);
         this.events.emit({
-          type: "warn",
+          type: "leaseRenewFailed",
           roleId: slot.meta.roleId,
           stageName: slot.stageName,
           at: this.now(),
-          detail: { message: `租约续期存储异常（忽略本轮）：${errMessage(e)}` },
+          detail: { failures: slot.renewFailures, error: errMessage(e) },
         });
+        if (slot.renewFailures >= StageManager.RENEW_FAILURE_LIMIT) {
+          this.invalidate(
+            slot,
+            new TroupeError(
+              `租约续期连续失败 ${slot.renewFailures} 次：${errMessage(e)}——先停止接单，等在飞 settle；存储恢复后由本节点或新 owner 重新取得租约（ADR 0002 I4）`,
+            ),
+          );
+        }
+      } finally {
+        slot.renewPending = false;
       }
     }
   }
@@ -411,7 +451,9 @@ export class StageManager {
     try {
       // 所有权前置（§6.5）：CAS 取得租约（新 epoch > 旧）→ 才允许 OnStage
       if (this.ownership) {
-        slot.epoch = await this.acquireWithRetry(slot);
+        const acquired = await this.acquireWithRetry(slot);
+        slot.epoch = acquired.epoch;
+        slot.leaseUntil = acquired.leaseUntil;
       }
       const stored = await this.store.read(this.config.namespace, roleId, stageName);
       let userProps: unknown;
@@ -589,7 +631,7 @@ export class StageManager {
   }
 
   /** 激活期获取所有权：短重试掩盖竞态，失败则显式拒绝（调用方可安全重试） */
-  private async acquireWithRetry(slot: ActorSlot): Promise<number> {
+  private async acquireWithRetry(slot: ActorSlot): Promise<{ epoch: number; leaseUntil: number }> {
     const own = this.ownership!;
     const roleId = slot.meta.roleId;
     const stageName = slot.stageName;
@@ -600,7 +642,7 @@ export class StageManager {
       );
       if (res.ok) {
         slot.lastRenewAt = this.now();
-        return res.epoch;
+        return { epoch: res.epoch, leaseUntil: res.leaseUntil };
       }
       last = res;
       await new Promise((r) => setTimeout(r, 100));
@@ -1042,21 +1084,32 @@ export class StageManager {
     }
     try {
       const payload = this.wrapForStore(slot);
+      // ADR 0002 I1/I2：启用 ownership 时 create / 回退 write / 常规 write 全部携带 token——
+      // 不存在任何"无 token 重试"路径（stale owner 的首次落盘与竞态兜底同被 fencing 拒绝）
+      const own = this.ownership;
+      const fencing =
+        own && slot.epoch > 0
+          ? { fencingToken: slot.epoch, fencingOwner: own.ownerId }
+          : undefined;
       let stored: StoredProps;
       if (slot.revision === 0) {
         try {
           stored = await this.store.create(
-            this.config.namespace, roleId, stageName, payload, meta.schemaVersion,
+            this.config.namespace, roleId, stageName, payload, meta.schemaVersion, fencing,
           );
         } catch (e) {
           if (e instanceof ConflictError && e.kind === "exists") {
-            // 竞态兜底：记录已存在 → 读取实际 revision 后按 CAS 重试一次
+            // 竞态兜底：记录已存在 → 读取实际 revision 后按 CAS 重试一次（同样带 token，I2）
             const cur = await this.store.read(this.config.namespace, roleId, stageName);
             if (!cur) throw e;
             slot.revision = cur.revision;
             stored = await this.store.write(
               this.config.namespace, roleId, stageName, payload,
-              { expectedRevision: slot.revision, schemaVersion: meta.schemaVersion },
+              {
+                expectedRevision: slot.revision,
+                schemaVersion: meta.schemaVersion,
+                ...fencing,
+              },
             );
           } else {
             throw e;
@@ -1068,7 +1121,7 @@ export class StageManager {
           {
             expectedRevision: slot.revision,
             schemaVersion: meta.schemaVersion,
-            ...(this.ownership && slot.epoch > 0 ? { fencingToken: slot.epoch } : {}),
+            ...fencing,
           },
         );
       }
