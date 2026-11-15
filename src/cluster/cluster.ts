@@ -20,6 +20,8 @@ import {
 } from "./transport.js";
 import { Roster } from "./roster.js";
 import { Playbill } from "./playbill.js";
+import { DirectoryRouter } from "./directory-router.js";
+import type { DirectoryStore } from "../props/directory.js";
 import { ShowBroker } from "../show/show.js";
 import type { Audience } from "../show/show.js";
 import type { SubscriptionStore } from "../show/subscription-store.js";
@@ -53,6 +55,8 @@ export class Cluster {
   private roster: Roster | null = null;
   private readonly playbill: Playbill;
   private readonly broker: ShowBroker;
+  /** 目录路由器（ADR 0004）：deps.directory 提供且 start() 后就绪；null = 环路由（dev/未启用） */
+  private router: DirectoryRouter | null = null;
   private stopped = false;
   selfAddr = "";
   private stageIdValue = "";
@@ -69,6 +73,10 @@ export class Cluster {
       showDeliver?: (audience: Audience, topic: string, event: unknown) => Promise<void>;
       /** Show 订阅持久化（M11+ 收尾）：coordinator 重启后重载订阅 */
       showStore?: SubscriptionStore;
+      /** 目录化所有权（ADR 0004，P1-3）：提供即启用目录路由（环降级为候选/减载） */
+      directory?: DirectoryStore;
+      /** 目录路由租约时长（ms；缺省 5000） */
+      leaseMs?: number;
     },
     private readonly opts: ClusterOptions = {},
   ) {
@@ -121,6 +129,18 @@ export class Cluster {
     this.selfAddr = this.opts.advertise ?? `${host}:${port}`;
     // Stage 身份 = addr#incarnation：重启即新身份（旧身份的租约/成员记录自然作废，§6.2/§6.5）
     this.stageIdValue = `${this.selfAddr}#${Date.now()}`;
+    // 目录路由器（ADR 0004 §3）：ownership 表即目录；环降级为候选生成器
+    if (this.deps.directory) {
+      this.router = new DirectoryRouter({
+        store: this.deps.directory,
+        namespace: this.deps.namespace,
+        selfAddr: this.selfAddr,
+        selfId: this.stageIdValue,
+        leaseMs: this.deps.leaseMs ?? 5_000,
+        candidates: (r, s2) => this.playbill.candidates(r, s2),
+        now: () => Date.now(),
+      });
+    }
     this.roster = new Roster(
       this.selfAddr,
       (addr, m) => this.transport.send(addr, m),
@@ -130,6 +150,8 @@ export class Cluster {
     this.roster.strictJoinFlag = production;
     this.roster.onMembersChanged = (alive) => {
       this.playbill.setMembers(alive);
+      // 目录路由：成员视图变更不猜测新归属——全部缓存条目失效，下一条消息回源（ADR 0004 §3）
+      this.router?.invalidateAll();
       // 成员视图变更 → 按新归属重放持久化订阅（M11+：coordinator 漂移接管）
       void this.broker.reloadOwned().catch(() => {});
       this.deps.events.emit({
@@ -313,10 +335,22 @@ export class Cluster {
     };
   }
 
-  /** 出站路由：归属自己（或无成员视图）→ 本地；否则转发到归属 Stage */
+  /** 出站路由：目录模式读目录（缓存→回源→claim→重读，ADR 0004）；否则按环视图 */
   async route(env: CallEnvelope): Promise<unknown> {
     if (this.stopped) {
       throw new CallRejectedError("Stage 已停机，拒收新 Call（优雅停机中）", "shutdown", false);
+    }
+    if (this.router) {
+      const target = await this.router.resolveOwner(env.roleId, env.stageName);
+      if (target === null) {
+        throw new CallRejectedError(
+          `目录路由未定归属：${env.roleId}/${env.stageName}（冷键首候选未就绪或目录不可达）——可安全重试`,
+          "ownership",
+          true,
+        );
+      }
+      if (target.self) return this.deps.localExec(env);
+      return this.remoteCall(target.addr, env);
     }
     const owner = this.ownerOf(env.roleId, env.stageName);
     if (!owner || owner === this.selfAddr) return this.deps.localExec(env);
@@ -449,7 +483,21 @@ export class Cluster {
         from: msg.from, // trace 调用方（§11.4）
         traceparent: msg.traceparent, // 调用链跨 Stage 传播（§11.4）
       };
-      const owner = this.ownerOf(env.roleId, env.stageName);
+      // 归属判定（ADR 0004 §3）：目录模式缓存→回源→claim→重读；环与目录不一致以目录为准
+      let owner: string | null;
+      if (this.router) {
+        const t = await this.router.resolveOwner(env.roleId, env.stageName);
+        owner = t === null ? null : t.addr;
+        if (owner === null) {
+          throw new CallRejectedError(
+            `目录路由未定归属：${env.roleId}/${env.stageName}（冷键首候选未就绪或目录不可达）——可安全重试`,
+            "ownership",
+            true,
+          );
+        }
+      } else {
+        owner = this.ownerOf(env.roleId, env.stageName);
+      }
       if (owner && owner !== this.selfAddr) {
         // 环漂移期：转发给当前归属（跳数上限 2，§6.3）
         if ((msg.hops ?? 0) >= 2) {

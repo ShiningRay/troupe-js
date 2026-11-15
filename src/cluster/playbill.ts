@@ -26,4 +26,9 @@ export class Playbill {
   ownerOfKey(rawKey: string): string | null {
     return this.ring.get(`${this.namespace}:${rawKey}`);
   }
+
+  /** 候选序列（ADR 0004 §3：首候选发起冷键 claim；环不做归属裁决） */
+  candidates(roleId: string, stageName: string): string[] {
+    return this.ring.candidates(`${this.namespace}:${roleId}:${stageName}`);
+  }
 }

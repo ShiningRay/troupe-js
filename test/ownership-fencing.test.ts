@@ -95,21 +95,23 @@ describe("反例 F1（ADR I1）：旧 epoch 在 takeover 后 create 必须失败
 
 // ---- F2/I2：create 冲突回退 write 必须带 token（StageManager save 路径）----
 
-describe("反例 F2（ADR I2）：旧 epoch 的 create 冲突回退 write 必须失败", () => {
-  it("双 Stage 共享 SQLite：B 顶替落盘后，A 的回退写不得覆盖 B 的数据", async () => {
+describe("反例 F2（ADR I2/I3）：旧 epoch 的陈旧槽位不得产生成功写", () => {
+  it("双 Stage 共享 SQLite：B 顶替落盘后，调用经目录路由由合法 owner 服务——A 的陈旧槽位无双写", async () => {
     const dir = mkdtempSync(join(tmpdir(), "troupe-f2-"));
     const store = new SqlitePropStore(dir);
 
-    // Stage A：fake clock 冻结 → 续租永不发生（本地时钟只是近似提示，租约以存储为准）
-    let fakeNow = 1_000_000;
+    // Stage A：冻结的真实时刻作时钟——续租节拍永不推进（now-lastRenewAt 恒 0），
+    // 同时 deadline 保持真实时间域（目录路由会把调用转发给 B，跨进程 transport
+    // 以真实时钟计算超时；纯虚拟时钟域的 deadline 在远端等价于"已过期"）
+    const frozenReal = Date.now();
     const a = await Troupe.form({
       actors: [FencingCart],
       propStore: store,
       defaultIntermission: 0,
-      defaultTimeout: "5s",
+      defaultTimeout: "30s",
       cluster: { port: 0 },
       ownership: { leaseMs: 300 },
-      now: () => fakeNow,
+      now: () => frozenReal,
     });
     // 激活 A（acquire epoch=1，revision=0 不落盘）
     expect(await a.cast(FencingCart, "k").peek()).toEqual({ items: [] });
@@ -129,14 +131,16 @@ describe("反例 F2（ADR I2）：旧 epoch 的 create 冲突回退 write 必须
     expect(unwrapEnvelope(afterB?.props).props).toMatchObject({ marker: "from-B" });
     expect(afterB?.revision).toBe(1);
 
-    // A 以旧 token（epoch=1）保存：create 冲突 → 回退 write 必须被 fencing 拒绝
-    // （修复前回退 write 无 token → 成功覆盖 B → 红）
-    await expect(a.cast(FencingCart, "k").touch()).rejects.toBeInstanceOf(ConflictError);
-
-    // B 的数据未被旧持有者覆盖
+    // P1-3 目录路由后：A 的调用按目录转给合法 owner B 执行（A 的陈旧槽位收不到流量，
+    // 旧 epoch 的 create/回退 write 路径根本不会触发——目录即权威，无双写窗口）。
+    // 即使路由到本地陈旧槽位（极端时序），save 携 token 也被 I1/I3 拒绝（F1 已证）。
+    // marker 只存在于 B 的槽位——返回 marker 即证明由 B 服务，而非 A 的空槽位
+    const served = await a.cast(FencingCart, "k").peek();
+    expect(served).toMatchObject({ marker: "from-B" });
     const final = await store.read("default", "FencingCart", "k");
-    expect(unwrapEnvelope(final?.props).props).toMatchObject({ marker: "from-B" });
-
+    expect(unwrapEnvelope(final?.props).props).toMatchObject({ marker: "from-B" }); // B 的数据完好
+    const own = await store.readOwnership("default", "FencingCart", "k");
+    expect(own!.ownerId).not.toContain(a.clusterAddress()!.split("#")[0]); // 所有权仍归 B 侧
     await b.shutdown();
     await a.shutdown();
   }, 30_000);

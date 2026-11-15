@@ -22,6 +22,7 @@ import { InMemoryPropStore } from "./props/memory.js";
 import { SqlitePropStore } from "./props/sqlite.js";
 import { StageManager, type CallEnvelope, type CastHandle, type OwnershipDeps, type StageConfig } from "./core/stage-manager.js";
 import { isOwnershipStore } from "./props/ownership.js";
+import { isDirectoryStore } from "./props/directory.js";
 import { createAgent, type Agent } from "./core/agent.js";
 import { Cluster, type ClusterOptions } from "./cluster/cluster.js";
 import { Booth, type BoothOptions } from "./booth/server.js";
@@ -532,6 +533,8 @@ export class Troupe {
           localExec: execLocal,
           directorRef,
           showStore,
+          // 目录化所有权（ADR 0004，P1-3）：共享存储支持 Directory 即启用目录路由
+          ...(isDirectoryStore(propStore) ? { directory: propStore, leaseMs: opts.ownership?.leaseMs ?? 5_000 } : {}),
           // Show 投递（M6）：经完整调用管道（Playbill 路由 → 串行 Turn）。
           // Audience 可能在其它 Stage——必须走 route（本地执行/远程转发），
           // 回调运行晚于 form() 完成，cluster 变量此时已就绪。

@@ -97,6 +97,28 @@ export class HashRing {
     return this.points[idx].node;
   }
 
+  /**
+   * key → 候选序列（从归属点起顺环去重；ADR 0004 §3：环只做候选生成/减载建议，
+   * 首候选是冷键 claim 的发起者）
+   */
+  candidates(key: string): string[] {
+    if (this.points.length === 0) return [];
+    const h = xxh32(key);
+    let lo = 0;
+    let hi = this.points.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.points[mid].h < h) lo = mid + 1;
+      else hi = mid;
+    }
+    const out: string[] = [];
+    for (let i = 0; i < this.points.length && out.length < this.nodes.length; i++) {
+      const node = this.points[(lo + i) % this.points.length].node;
+      if (!out.includes(node)) out.push(node);
+    }
+    return out;
+  }
+
   /** 从 hash(node) 位置向后取 k 个不同的其它节点（Roster 探测目标） */
   successors(node: string, k: number): string[] {
     if (this.nodes.length <= 1) return [];

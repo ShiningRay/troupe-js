@@ -127,9 +127,21 @@ describe("M3 验收：正常扩容交接（旧持有者排空落盘释放，无�
     expect(drifted).toBeDefined();
     const before = await b.store.readOwnership("default", "OwnCart", drifted!);
 
-    // 漂移键的下一次调用：B 的续租 ticker 发现不再归属 → 排空 → offStage+save → 释放
-    // （期间新持有者 acquire 可能被旧租约挡住 → retryTransient 覆盖交接窗口 ≤ leaseMs）
-    expect(await retryTransient(() => a.troupe.cast(OwnCartActor, drifted!).peek())).toBe(1);
+    // 漂移键（P1-3 目录路由语义）：首次调用可能仍由 B 服务（目录说 B 且租约有效）；
+    // B 的续租 ticker 发现不再归属（环漂移 = 迁移建议，ADR 0004 §4）→ 排空 → offStage+save
+    // → release（lease=0/draining）→ 之后的调用由 C claim（epoch+1）接管。循环等待交接窗口。
+    const handoverDeadline = Date.now() + 15_000;
+    let served = 0;
+    for (;;) {
+      served = await retryTransient(() => a.troupe.cast(OwnCartActor, drifted!).peek());
+      const own = await c.store.readOwnership("default", "OwnCart", drifted!);
+      if (own && own.ownerId.includes(c.troupe.clusterAddress()!)) break;
+      if (Date.now() > handoverDeadline) {
+        throw new Error(`扩容交接未完成：ownership=${JSON.stringify(own)}`);
+      }
+      await sleep(150);
+    }
+    expect(served).toBe(1);
 
     const after = await c.store.readOwnership("default", "OwnCart", drifted!);
     expect(after!.ownerId).toContain(c.troupe.clusterAddress()!);
