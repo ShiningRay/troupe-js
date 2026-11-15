@@ -22,7 +22,12 @@
 
 **推荐交付范围 B = P0 + P1**（约 35–50 pd）：这是“敢对外说生产可用”的最低门槛。范围 C = P0–P3（约 70–105 pd）才是 Orleans-class 核心 + 可靠消息。范围 A = 仅 P0（约 2–3 周），适合先止血。
 
-## 2. P0：可信基线（第 1–3 周）
+## 2. P0：可信基线（第 1–3 周）——✅ 已完成（2026-11-16）
+
+> P0-1..P0-8 全部交付并推送：ADR 0002、反例 F1–F6（先红后绿）、StoreCapabilities、
+> PG/SQLite 严格 fencing、续租失败停服、production 门禁、CI 六 job（含 pg-required 必跑 leg）、
+> 文档单一来源。证据：[VERIFICATION](./VERIFICATION.md)、run [43746483768](https://github.com/ShiningRay/troupejs/actions/runs/43746483768) 全绿。
+> issue 映射更新：#2/#3 已随 P0-7 关闭。
 
 ### P0-1 写所有权/fencing ADR（2 pd）
 
