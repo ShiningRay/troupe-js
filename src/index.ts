@@ -47,6 +47,7 @@ export {
 export {
   TroupeError,
   ConflictError,
+  RetentionExceededError,
   CallTimeoutError,
   CallRejectedError,
   IdempotencyConflictError,

@@ -155,7 +155,7 @@ export class PostgresStreamStore implements StreamStore {
         `INSERT INTO ${this.q("stream_cursors")} (topic, consumer, acked_seq, updated_at)
          VALUES ($1, $2, $3, (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint)
          ON CONFLICT (topic, consumer) DO UPDATE SET
-           acked_seq = ${this.q("stream_cursors")}.acked_seq,
+           acked_seq = EXCLUDED.acked_seq,
            updated_at = EXCLUDED.updated_at
          WHERE ${this.q("stream_cursors")}.acked_seq < $3`,
         [topic, consumer, seq],
