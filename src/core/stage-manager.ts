@@ -982,6 +982,7 @@ export class StageManager {
   ): Promise<void> {
     if (slot.state !== "running") return;
     slot.state = "draining";
+    if (reason === "handover") this.metrics.handover(slot.meta.roleId); // ADR 0004 §4 handoff 观测
     this.clearIdle(slot);
     this.clearAllMemoryCues(slot); // 内存 Cue 随下场消失（§3.3）；重新登台经 onStage 重注册
     this.events.emit({

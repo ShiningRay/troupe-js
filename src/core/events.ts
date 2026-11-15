@@ -12,6 +12,7 @@ export type TroupeEventType =
   | "offStage"
   | "offStageFailed"
   | "invalidated"
+  | "ownershipRecovered"
   | "saveSucceeded"
   | "saveFailed"
   | "clusterStarted"
@@ -62,6 +63,8 @@ export interface RoleMetricsSnapshot {
   cueSkipped: number;
   /** 租约续期失败次数（ADR 0002 I4：连续失败触发 stop-serving） */
   leaseRenewFailures: number;
+  /** 环漂移交接次数（ADR 0004 §4 handoff：排空→落盘→释放→新 owner 接管） */
+  handovers: number;
   latency: { p50: number; p99: number; max: number; samples: number };
 }
 
@@ -70,7 +73,7 @@ const RING_SIZE = 256;
 export class Metrics {
   private byRole = new Map<
     string,
-    { calls: number; errors: number; rejections: number; cueSkipped: number; leaseRenewFailures: number; ring: number[] }
+    { calls: number; errors: number; rejections: number; cueSkipped: number; leaseRenewFailures: number; handovers: number; ring: number[] }
   >();
 
   constructor(private readonly now: () => number) {}
@@ -78,7 +81,7 @@ export class Metrics {
   private role(roleId: string) {
     let r = this.byRole.get(roleId);
     if (!r) {
-      r = { calls: 0, errors: 0, rejections: 0, cueSkipped: 0, leaseRenewFailures: 0, ring: [] };
+      r = { calls: 0, errors: 0, rejections: 0, cueSkipped: 0, leaseRenewFailures: 0, handovers: 0, ring: [] };
       this.byRole.set(roleId, r);
     }
     return r;
@@ -107,6 +110,11 @@ export class Metrics {
     this.role(roleId).leaseRenewFailures++;
   }
 
+  /** 环漂移交接计数（ADR 0004 §4：建议性迁移的排空落盘释放） */
+  handover(roleId: string): void {
+    this.role(roleId).handovers++;
+  }
+
   snapshot(): Record<string, RoleMetricsSnapshot> {
     const out: Record<string, RoleMetricsSnapshot> = {};
     for (const [roleId, r] of this.byRole) {
@@ -118,6 +126,7 @@ export class Metrics {
         rejections: r.rejections,
         cueSkipped: r.cueSkipped,
         leaseRenewFailures: r.leaseRenewFailures,
+        handovers: r.handovers,
         latency: {
           p50: pick(0.5),
           p99: pick(0.99),

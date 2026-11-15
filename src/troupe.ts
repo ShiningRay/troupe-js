@@ -600,6 +600,25 @@ export class Troupe {
         store: propStore,
         isRingOwner: (r, s) => (cluster ? cluster.ownerOf(r, s) === cluster.selfAddr : true),
       };
+      // 启动恢复扫描（ADR 0004 §4）：同地址旧 incarnation 的目录条目 → claim 到新身份
+      // （epoch+1 顶替；端口互斥保证旧进程必死）。仅集群 + DirectoryStore 可用。
+      if (cluster && isDirectoryStore(propStore)) {
+        const recovered: string[] = [];
+        const stale = await propStore.listOwned(cluster.address()!);
+        for (const e of stale) {
+          if (e.ownerId === ownershipRef.current.ownerId) continue;
+          const r = await propStore.claim(e.namespace, e.roleId, e.stageName, ownershipRef.current.ownerId, ownershipRef.current.leaseMs);
+          if (r.ok) recovered.push(`${e.roleId}/${e.stageName}(epoch=${r.epoch})`);
+        }
+        if (recovered.length > 0) {
+          events.emit({
+            type: "ownershipRecovered",
+            roleId: "<troupe>",
+            at: now(),
+            detail: { recovered: recovered.length, entries: recovered.slice(0, 20) },
+          });
+        }
+      }
     } else if (cluster && isOwnershipStore(propStore)) {
       const message =
         "共享存储支持所有权但未启用：当前为允许重复激活的实验性集群（§6.5）；form({ ownership: {} }) 或 production 模式启用";

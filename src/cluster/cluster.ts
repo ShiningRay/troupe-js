@@ -189,6 +189,11 @@ export class Cluster {
     return this.playbill.ownerOf(roleId, stageName);
   }
 
+  /** 目录路由统计（ADR 0004 §6 观测；未启用目录路由返回 null） */
+  routerStats(): { hits: number; misses: number; claims: number; claimWins: number; cacheSize: number } | null {
+    return this.router?.stats() ?? null;
+  }
+
   // ---- Show（M6）----
 
   private showOwnerOf(topic: string): string | null {

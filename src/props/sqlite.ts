@@ -64,6 +64,7 @@ export class SqlitePropStore implements PropStore, OwnershipStore, DirectoryStor
     ownInsert: ReturnType<DatabaseSyncType["prepare"]>;
     ownRenew: ReturnType<DatabaseSyncType["prepare"]>;
     ownTakeover: ReturnType<DatabaseSyncType["prepare"]>;
+    ownTakeoverRestarted: ReturnType<DatabaseSyncType["prepare"]>;
     ownRelease: ReturnType<DatabaseSyncType["prepare"]>;
   } | null = null;
 
@@ -170,6 +171,10 @@ export class SqlitePropStore implements PropStore, OwnershipStore, DirectoryStor
       ownTakeover: this.db.prepare(
         // 顶替过期租约（含 tombstone/释放态）：epoch+1、version+1
         "UPDATE ownership SET owner_id = ?, epoch = epoch + 1, lease_until = ?, status = 'active', version = version + 1 WHERE namespace = ? AND role_id = ? AND stage_name = ? AND lease_until <= ?",
+      ),
+      ownTakeoverRestarted: this.db.prepare(
+        // 同地址重启顶替（ADR 0004 §4）：addr 相同即旧 incarnation 必死（端口互斥），租约未过期也顶替
+        "UPDATE ownership SET owner_id = ?, epoch = epoch + 1, lease_until = ?, status = 'active', version = version + 1 WHERE namespace = ? AND role_id = ? AND stage_name = ? AND substr(owner_id, 1, instr(owner_id, '#') - 1) = substr(?, 1, instr(?, '#') - 1)",
       ),
       ownRelease: this.db.prepare(
         // 不删行：置空租约 + draining——epoch 必须跨释放单调（否则旧持有者的 token 可通过 fencing）；version+1
@@ -412,7 +417,11 @@ export class SqlitePropStore implements PropStore, OwnershipStore, DirectoryStor
       if (c === 1) return { ok: true, epoch: row.epoch, leaseUntil: until, version: Number(row.version) + 1 };
     }
     // 顶替过期租约（含 tombstone/释放态）：epoch + 1（fencing token 单调递增），version+1
-    const c = this.stmts!.ownTakeover.run(ownerId, until, namespace, roleId, stageName, now).changes;
+    let c = this.stmts!.ownTakeover.run(ownerId, until, namespace, roleId, stageName, now).changes;
+    if (c !== 1 && ownerId.includes("#")) {
+      // 同地址不同 incarnation（重启恢复，ADR 0004 §4）：租约未过期也顶替
+      c = this.stmts!.ownTakeoverRestarted.run(ownerId, until, namespace, roleId, stageName, ownerId, ownerId).changes;
+    }
     if (c === 1) {
       const fresh = this.stmts!.ownGet.get(namespace, roleId, stageName) as {
         epoch: number;

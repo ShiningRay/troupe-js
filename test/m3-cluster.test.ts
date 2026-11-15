@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Actor, CallRejectedError, Troupe } from "../src/index.js";
+import type { TroupeEvent } from "../src/core/events.js";
 import { SqlitePropStore } from "../src/props/sqlite.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -151,6 +152,52 @@ describe("M3 验收：正常扩容交接（旧持有者排空落盘释放，无�
     await a.troupe.shutdown();
     await b.troupe.shutdown();
     await c.troupe.shutdown();
+  }, 30_000);
+});
+
+describe("M3/P1-4 验收：重启恢复扫描（ADR 0004 §4，同地址顶替）", () => {
+  it("destroy 后同端口重启 → 恢复扫描 claim 旧目录条目（epoch+1，不等租约过期）", async () => {
+    const dir = tmpDir();
+    const port = 17_800 + (process.pid % 1_500);
+    const leaseMs = 60_000; // 长租约：证明同地址顶替不依赖租约过期
+    const storeA = new SqlitePropStore(dir);
+    const a = await Troupe.form({
+      actors: [OwnCartActor],
+      propStore: storeA,
+      defaultIntermission: 0,
+      defaultTimeout: "10s",
+      cluster: { port, advertise: `127.0.0.1:${port}` },
+      ownership: { leaseMs },
+    });
+    await a.cast(OwnCartActor, "rk").add("one"); // 单节点环：冷键由自己 claim（epoch=1）
+    const own1 = await storeA.readOwnership("default", "OwnCart", "rk");
+    expect(own1!.ownerId).toContain(`127.0.0.1:${port}#`);
+    expect(own1!.epoch).toBe(1);
+
+    a.destroy(); // kill -9 语义：无 leave、无排空、租约滞留（60s 未过期）
+
+    // 同端口重启（production 部署形态）：新 incarnation 经恢复扫描接管旧条目
+    const storeB = new SqlitePropStore(dir);
+    const events: TroupeEvent[] = [];
+    const b = await Troupe.form({
+      actors: [OwnCartActor],
+      propStore: storeB,
+      defaultIntermission: 0,
+      defaultTimeout: "10s",
+      cluster: { port, advertise: `127.0.0.1:${port}` },
+      ownership: { leaseMs },
+      onEvent: (e) => events.push(e),
+    });
+    const own2 = await storeB.readOwnership("default", "OwnCart", "rk");
+    expect(own2!.ownerId).toContain(`127.0.0.1:${port}#`);
+    expect(own2!.ownerId).not.toBe(own1!.ownerId); // 新 incarnation
+    expect(own2!.epoch).toBe(own1!.epoch + 1); // fencing token 单调
+    expect(
+      events.some((e) => e.type === "ownershipRecovered" && (e.detail?.recovered as number) >= 1),
+    ).toBe(true);
+    // 数据完好，新身份可服务
+    expect(await b.cast(OwnCartActor, "rk").peek()).toBe(1);
+    await b.shutdown();
   }, 30_000);
 });
 

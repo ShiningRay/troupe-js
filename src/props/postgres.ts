@@ -340,25 +340,28 @@ export class PostgresPropStore implements PropStore, OwnershipStore, DirectorySt
   ): Promise<DirectoryClaimResult> {
     const c = await this.client();
     try {
-      // 单语句原子：插入或（过期顶替 epoch+1 / 本人续租 / tombstone 重建）；租约边界以 PG 时钟为准
+      // 单语句原子：插入或（过期顶替 epoch+1 / 本人续租 / 同地址重启顶替 / tombstone 重建）；
+      // 租约边界以 PG 时钟为准。同地址（addr#incarnation 的 addr 部分）不同 incarnation：
+      // TCP 端口互斥 ⇒ 旧 incarnation 必已死亡，允许立即顶替（ADR 0004 §4 启动恢复）。
+      const sameAddr =
+        `split_part(${this.q("ownership")}.owner_id, '#', 1) = split_part(EXCLUDED.owner_id, '#', 1)`;
+      const expiredOrSelfOrRestarted =
+        `${this.q("ownership")}.owner_id = EXCLUDED.owner_id OR ${this.q("ownership")}.lease_until <= ${PG_DB_NOW_MS} OR ${sameAddr}`;
       const r = await c.query(
         `INSERT INTO ${this.q("ownership")} (namespace, role_id, stage_name, owner_id, epoch, lease_until, version, status)
          VALUES ($1, $2, $3, $4, 1, ${PG_DB_NOW_MS} + $5, 1, 'active')
          ON CONFLICT (namespace, role_id, stage_name) DO UPDATE SET
-           owner_id = CASE WHEN ${this.q("ownership")}.owner_id = EXCLUDED.owner_id
-                           OR ${this.q("ownership")}.lease_until <= ${PG_DB_NOW_MS}
+           owner_id = CASE WHEN ${expiredOrSelfOrRestarted}
                       THEN EXCLUDED.owner_id ELSE ${this.q("ownership")}.owner_id END,
            epoch = CASE WHEN ${this.q("ownership")}.owner_id = EXCLUDED.owner_id
                           THEN ${this.q("ownership")}.epoch
-                        WHEN ${this.q("ownership")}.lease_until <= ${PG_DB_NOW_MS}
+                        WHEN ${expiredOrSelfOrRestarted}
                           THEN ${this.q("ownership")}.epoch + 1
                         ELSE ${this.q("ownership")}.epoch END,
-           lease_until = CASE WHEN ${this.q("ownership")}.owner_id = EXCLUDED.owner_id
-                                 OR ${this.q("ownership")}.lease_until <= ${PG_DB_NOW_MS}
+           lease_until = CASE WHEN ${expiredOrSelfOrRestarted}
                             THEN EXCLUDED.lease_until
                             ELSE ${this.q("ownership")}.lease_until END,
-           status = CASE WHEN ${this.q("ownership")}.lease_until <= ${PG_DB_NOW_MS}
-                              OR ${this.q("ownership")}.owner_id = EXCLUDED.owner_id
+           status = CASE WHEN ${expiredOrSelfOrRestarted}
                          THEN 'active' ELSE ${this.q("ownership")}.status END,
            version = ${this.q("ownership")}.version + 1
          RETURNING owner_id, epoch, lease_until, version, status`,
