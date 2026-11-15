@@ -20,6 +20,7 @@ export { SqliteCueStore } from "./cues/sqlite.js";
 export { PostgresCueStore } from "./cues/postgres.js";
 export { isStreamStore, type StreamStore, type StreamMessage, type StreamCursor, type StreamAppendResult } from "./streams/stream-store.js";
 export { PostgresStreamStore } from "./streams/postgres.js";
+export { StreamConsumer, type StreamConsumerOptions, type StreamConsumerStats } from "./streams/consumer.js";
 export { CueScheduler } from "./cues/scheduler.js";
 export { codecCopy, defaultJsonCodec, type Codec } from "./core/codec.js";
 export { HashRing, xxh32 } from "./cluster/hash-ring.js";
