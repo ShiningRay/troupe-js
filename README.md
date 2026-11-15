@@ -2,7 +2,7 @@
 
 面向 Node.js/TypeScript 的 **Virtual Actor** 框架。设计见 [DESIGN.md](./DESIGN.md)，开发计划见 [PLAN.md](./PLAN.md)。
 
-> 状态：**M1–M11 已交付**；Orleans 对齐执行计划进行中——**当前完成 P0（可信基线）**：fencing 全路径反例闭合（[ADR 0002](./docs/adr/0002-ownership-fencing.md)）、续租失败停止接单、production Provider 门禁、CI 矩阵（Linux/Windows × Node 22/24 + PostgreSQL 必需 leg）。下一阶段 P1（生产 HA：目录化所有权 / PG CueStore / TLS+join / 3 节点混沌）见 [ROADMAP](./docs/ROADMAP.md)。
+> 状态：**M1–M11 已交付**；Orleans 对齐执行计划进行中——**P0（可信基线）与 P1（生产 HA）已完成**：fencing 全路径反例闭合（[ADR 0002](./docs/adr/0002-ownership-fencing.md)）、目录化路由（[ADR 0004](./docs/adr/0004-directory-ownership.md)：环降级候选、缓存→回源→claim）、同地址重启恢复、PG CueStore（SKIP LOCKED + CAS）+ cron 时区、production 强制 TLS + join 凭证限速 + adminToken、3 节点混沌入 CI/nightly。下一阶段 P2（可靠消息：Stream/Outbox/协作取消）见 [ROADMAP](./docs/ROADMAP.md)。
 > 能力声明以 [CI](https://github.com/ShiningRay/troupejs/actions) 与 [VERIFICATION](./docs/VERIFICATION.md) 为准，不以本文表述为准。要求 Node >= 22.13；production 集群要求跨节点安全 Provider（PostgresPropStore）。
 
 ## 快速开始（仓库内）

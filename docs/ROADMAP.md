@@ -121,7 +121,13 @@ interface StoreCapabilities {
 
 **P0 退出标准**：P0-2 的 6 个反例全绿；CI 在 Linux+PG 上必跑；production 拒绝 SQLite；代码中不存在“create 无 token”“冲突回退无 token”“续租异常继续服务”的路径（用 grep/评审清单确认）。
 
-## 3. P1：生产 HA（第 4–10 周）
+## 3. P1：生产 HA（第 4–10 周）——✅ 已完成（2026-11-16）
+
+> P1-1..P1-7 全部交付：目录化所有权（ADR 0004：DirectoryStore/路由缓存/同地址恢复扫描）；
+> PostgresCueStore（SKIP LOCKED + CAS）与 cron 时区；TLS + join 凭证限速 + adminToken 生产门禁；
+> 3 节点混沌（冻结 owner → 幸存方接管 → FENCED）入 CI pg-required leg 与 nightly。
+> 已知边界：网络分区注入以 SIGSTOP 近似（toxiproxy 未接入）；3 进程 PG Cue 并发由契约竞争测试覆盖。
+> 证据：run 43755577577+ 全绿、[VERIFICATION](./VERIFICATION.md)。
 
 ### P1-1 目录 ADR（2 pd）
 
