@@ -17,6 +17,7 @@ export { isDirectoryStore, type DirectoryStore, type DirectoryRecord, type Direc
 export { type CueStore, type ReminderRecord, type ReminderSpec, type ReminderKey } from "./cues/cue-store.js";
 export { InMemoryCueStore } from "./cues/memory.js";
 export { SqliteCueStore } from "./cues/sqlite.js";
+export { PostgresCueStore } from "./cues/postgres.js";
 export { CueScheduler } from "./cues/scheduler.js";
 export { codecCopy, defaultJsonCodec, type Codec } from "./core/codec.js";
 export { HashRing, xxh32 } from "./cluster/hash-ring.js";

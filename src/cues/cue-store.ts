@@ -9,8 +9,14 @@
 export interface ReminderSpec {
   every?: string | number;
   at?: number | Date;
-  /** cron 表达式（"0 9 * * *"，服务器本地时间；@Cron 装饰器使用） */
+  /**
+   * cron 表达式（"0 9 * * *"；@Cron 装饰器使用）。
+   * 时区语义：显式 timeZone（IANA 名，P1-5）→ 该时区 wall clock；
+   * 未显式声明 → 服务器本地时间（模糊——跨节点部署建议显式声明，见 ROADMAP P1-5）。
+   */
   cron?: string;
+  /** IANA 时区名（如 "Asia/Shanghai"），仅 cron 语义生效；无效名在登记时显式拒绝 */
+  timeZone?: string;
   payload?: unknown;
 }
 
@@ -26,6 +32,8 @@ export interface ReminderRecord {
   at: number | null;
   /** cron 表达式（服务器本地时间）；非 cron 提醒为 null（M4 装饰器交付） */
   cron: string | null;
+  /** cron 的 IANA 时区（P1-5）；null = 服务器本地时间（旧记录兼容） */
+  timeZone: string | null;
   nextDue: number;
   /** CAS 版本：claim/complete/upsert 递增 */
   statusVersion: number;
@@ -34,7 +42,7 @@ export interface ReminderRecord {
   owner: string | null;
 }
 
-import { nextCronTime, parseCronExpression } from "./cron.js";
+import { nextCronTime, nextCronTimeInZone, parseCronExpression } from "./cron.js";
 import type { StoreCapabilities } from "../props/capabilities.js";
 
 export type ReminderKey = Pick<ReminderRecord, "namespace" | "roleId" | "stageName" | "name">;
@@ -73,9 +81,17 @@ export function reminderKey(
   return { namespace, roleId, stageName, name };
 }
 
-/** 计算下次到期：cron → 解析下次触发；周期 → now+every（错过跳过补发一次，不追赶）；一次性 → null（完成即删） */
-export function nextDueAfter(rec: Pick<ReminderRecord, "everyMs" | "cron">, now: number): number | null {
-  if (rec.cron !== null) return nextCronTime(parseCronExpression(rec.cron), now);
+/** 计算下次到期：cron → 解析下次触发（有 timeZone 走该时区 wall clock）；周期 → now+every；一次性 → null */
+export function nextDueAfter(
+  rec: Pick<ReminderRecord, "everyMs" | "cron" | "timeZone">,
+  now: number,
+): number | null {
+  if (rec.cron !== null) {
+    const expr = parseCronExpression(rec.cron);
+    return rec.timeZone
+      ? nextCronTimeInZone(expr, now, rec.timeZone)
+      : nextCronTime(expr, now);
+  }
   return rec.everyMs !== null ? now + rec.everyMs : null;
 }
 

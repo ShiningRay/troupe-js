@@ -541,7 +541,9 @@ export class StageManager {
           await this.cueApi.ensure(
             { roleId, stageName },
             cueName,
-            plan.cron !== undefined ? { cron: plan.cron } : { every: plan.everyMs },
+            plan.cron !== undefined
+              ? { cron: plan.cron, timeZone: plan.timeZone }
+              : { every: plan.everyMs },
           );
         }
       }

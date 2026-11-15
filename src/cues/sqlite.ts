@@ -20,6 +20,7 @@ interface CueRow {
   every_ms: number | null;
   at_ms: number | null;
   cron: string | null;
+  time_zone: string | null;
   next_due: number;
   status_version: number;
   lease_until: number;
@@ -76,23 +77,27 @@ export class SqliteCueStore implements CueStore {
     if (!cols.some((c) => c.name === "cron")) {
       this.db.exec("ALTER TABLE cues ADD COLUMN cron TEXT");
     }
+    if (!cols.some((c) => c.name === "time_zone")) {
+      this.db.exec("ALTER TABLE cues ADD COLUMN time_zone TEXT");
+    }
     this.stmts = {
       upsert: this.db.prepare(`
-        INSERT INTO cues (namespace, role_id, stage_name, name, payload_json, every_ms, at_ms, cron, next_due, status_version, lease_until, owner)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, NULL)
+        INSERT INTO cues (namespace, role_id, stage_name, name, payload_json, every_ms, at_ms, cron, time_zone, next_due, status_version, lease_until, owner)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, NULL)
         ON CONFLICT (namespace, role_id, stage_name, name) DO UPDATE SET
           payload_json = excluded.payload_json,
           every_ms = excluded.every_ms,
           at_ms = excluded.at_ms,
           cron = excluded.cron,
+          time_zone = excluded.time_zone,
           next_due = excluded.next_due,
           status_version = cues.status_version + 1,
           lease_until = 0,
           owner = NULL
       `),
       ensure: this.db.prepare(`
-        INSERT INTO cues (namespace, role_id, stage_name, name, payload_json, every_ms, at_ms, cron, next_due, status_version, lease_until, owner)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, NULL)
+        INSERT INTO cues (namespace, role_id, stage_name, name, payload_json, every_ms, at_ms, cron, time_zone, next_due, status_version, lease_until, owner)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, NULL)
         ON CONFLICT (namespace, role_id, stage_name, name) DO NOTHING
       `),
       del: this.db.prepare(
@@ -129,6 +134,7 @@ export class SqliteCueStore implements CueStore {
       everyMs: row.every_ms === null ? null : Number(row.every_ms),
       at: row.at_ms === null ? null : Number(row.at_ms),
       cron: row.cron ?? null,
+      timeZone: row.time_zone ?? null,
       nextDue: Number(row.next_due),
       statusVersion: Number(row.status_version),
       leaseUntil: Number(row.lease_until),
@@ -141,7 +147,7 @@ export class SqliteCueStore implements CueStore {
     this.stmts!.upsert.run(
       rec.namespace, rec.roleId, rec.stageName, rec.name,
       JSON.stringify(cloneReminderPayload(rec.payload)),
-      rec.everyMs, rec.at, rec.cron, rec.nextDue,
+      rec.everyMs, rec.at, rec.cron, rec.timeZone ?? null, rec.nextDue,
     );
   }
 
@@ -150,7 +156,7 @@ export class SqliteCueStore implements CueStore {
     this.stmts!.ensure.run(
       rec.namespace, rec.roleId, rec.stageName, rec.name,
       JSON.stringify(cloneReminderPayload(rec.payload)),
-      rec.everyMs, rec.at, rec.cron, rec.nextDue,
+      rec.everyMs, rec.at, rec.cron, rec.timeZone ?? null, rec.nextDue,
     );
   }
 

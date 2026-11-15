@@ -1,7 +1,7 @@
 import { Actor } from "./actor.js";
 import { captureSource, registerActor } from "./repertoire.js";
 import { parseDuration } from "./duration.js";
-import { parseCronExpression } from "../cues/cron.js";
+import { parseCronExpression, validateTimeZone } from "../cues/cron.js";
 import { registerDecoratedCues } from "./cue-dispatch.js";
 
 /** TS5 stage-3 类装饰器签名。实现都是原地标注（返回 void）——声明为 Function | void
@@ -23,7 +23,7 @@ export interface RoleMeta {
   /** RPC 白名单：原型链上的公开方法（生命周期/基类成员/下划线开头者除外） */
   rpcMethods: ReadonlySet<string>;
   /** 声明式持久提醒（@Cron/@Every）：方法名 → 计划 */
-  persistentCues: ReadonlyMap<string, { everyMs?: number; cron?: string }>;
+  persistentCues: ReadonlyMap<string, { everyMs?: number; cron?: string; timeZone?: string }>;
   /** 声明式内存 Cue（@Local）：方法名 → 周期 ms */
   localCues: ReadonlyMap<string, number>;
   source: string;
@@ -83,10 +83,11 @@ type CueDecoratorFactory = (target: Function, ctx: ClassMethodDecoratorContext<a
  * 方法即处理器：激活时自动登记（不存在才插入，不重置已排期）；触发经 onCue 进串行 Turn；
  * 装饰的方法仍可经 RPC 手动触发（CLI/Booth 调试）。表达式在装饰期解析，非法即报错。
  */
-export function Cron(expr: string): CueDecoratorFactory {
+export function Cron(expr: string, opts?: { timeZone?: string }): CueDecoratorFactory {
   parseCronExpression(expr); // 装饰期 fail-fast
+  if (opts?.timeZone !== undefined) validateTimeZone(opts.timeZone);
   return (target: Function, _ctx: ClassMethodDecoratorContext<any, any>): void => {
-    (target as any)[CRON_MARK] = expr;
+    (target as any)[CRON_MARK] = { cron: expr, timeZone: opts?.timeZone };
   };
 }
 
@@ -128,7 +129,7 @@ function collectRpcMethods(ctor: Function): {
   names: Set<string>;
   improv: Set<string>;
   readOnly: Set<string>;
-  persistentCues: Map<string, { everyMs?: number; cron?: string }>;
+  persistentCues: Map<string, { everyMs?: number; cron?: string; timeZone?: string }>;
   localCues: Map<string, number>;
 } {
   const names = new Set<string>();
@@ -146,7 +147,11 @@ function collectRpcMethods(ctor: Function): {
       names.add(name);
       if ((desc.value as any)[IMPROV_MARK]) improv.add(name);
       if ((desc.value as any)[READONLY_MARK]) readOnly.add(name);
-      if ((desc.value as any)[CRON_MARK] !== undefined) persistentCues.set(name, { cron: (desc.value as any)[CRON_MARK] });
+      if ((desc.value as any)[CRON_MARK] !== undefined) {
+        const mark = (desc.value as any)[CRON_MARK] as string | { cron: string; timeZone?: string };
+        const plan = typeof mark === "string" ? { cron: mark } : mark; // 兼容旧标记形态
+        persistentCues.set(name, plan);
+      }
       if ((desc.value as any)[EVERY_MARK] !== undefined) persistentCues.set(name, { everyMs: (desc.value as any)[EVERY_MARK] });
       if ((desc.value as any)[LOCAL_MARK] !== undefined) localCues.set(name, (desc.value as any)[LOCAL_MARK]);
     }

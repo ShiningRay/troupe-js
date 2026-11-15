@@ -27,7 +27,7 @@ import { createAgent, type Agent } from "./core/agent.js";
 import { Cluster, type ClusterOptions } from "./cluster/cluster.js";
 import { Booth, type BoothOptions } from "./booth/server.js";
 import type { CueStore, ReminderSpec } from "./cues/cue-store.js";
-import { nextCronTime, parseCronExpression } from "./cues/cron.js";
+import { nextCronTime, nextCronTimeInZone, parseCronExpression, validateTimeZone } from "./cues/cron.js";
 import { InMemoryCueStore } from "./cues/memory.js";
 import { SqliteCueStore } from "./cues/sqlite.js";
 import { CueScheduler } from "./cues/scheduler.js";
@@ -431,9 +431,13 @@ export class Troupe {
       if (everyMs !== null && !(everyMs > 0)) {
         throw new TroupeError(`提醒 "${name}" 的 every 必须为正时长`);
       }
+      // 时区（P1-5）：显式 timeZone → 该时区 wall clock（无效名显式拒绝）；缺省服务器本地时间
+      const timeZone = spec.timeZone ?? null;
+      if (timeZone !== null) validateTimeZone(timeZone);
       let nextDue: number;
       if (cron !== null) {
-        const t = nextCronTime(parseCronExpression(cron), now());
+        const expr = parseCronExpression(cron);
+        const t = timeZone !== null ? nextCronTimeInZone(expr, now(), timeZone) : nextCronTime(expr, now());
         if (t === null) throw new TroupeError(`提醒 "${name}" 的 cron 一年内无触发时间：${cron}`);
         nextDue = t;
       } else if (everyMs !== null) {
@@ -450,6 +454,7 @@ export class Troupe {
         everyMs,
         at,
         cron,
+        timeZone,
         nextDue,
       };
     };
