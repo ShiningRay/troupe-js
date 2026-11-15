@@ -3,3 +3,5 @@ dist/
 .troupe/
 *.tsbuildinfo
 .zcode
+test-results/
+.ci-pack-test/
