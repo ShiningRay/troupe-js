@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { ConflictError, RetentionExceededError } from "../src/index.js";
 import { PostgresStreamStore } from "../src/streams/postgres.js";
