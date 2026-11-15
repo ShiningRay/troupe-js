@@ -74,7 +74,7 @@ describe.runIf(!!PG_URL)("StreamConsumer 契约（真实 PostgreSQL）", () => {
     expect(await store.cursor(topic, "flaky")).toMatchObject({ ackedSeq: 3 });
   });
 
-  it("会话内去重：ack 丢失窗口的重投被跳过（delivered 只计一次）", async () => {
+  it("会话内去重：已交付区间不回读（同实例 replay 后不重投）；跨会话重投属 at-least-once", async () => {
     const topic = t("dup");
     await appendN(topic, 2);
     const delivered: number[] = [];
@@ -84,13 +84,21 @@ describe.runIf(!!PG_URL)("StreamConsumer 契约（真实 PostgreSQL）", () => {
     });
     await consumer.pollOnce();
     expect(delivered).toEqual([1, 2]);
-    // 模拟 ack 丢失：游标回拨（replay）→ 同批重投 → 会话内 lastDeliveredSeq 拦截
+
+    // 同实例 + 游标被回拨（模拟 ack 丢失）：会话内 lastDeliveredSeq 使 poll 直接从
+    // max(acked, lastDelivered) 之后拉取——已交付区间根本不回读（比逐条判重更省）
     await store.replay(topic, "dedup", 0);
-    expect(await consumer.pollOnce()).toBe(0); // 全部被判重复，0 条新投递
+    expect(await consumer.pollOnce()).toBe(0);
     expect(delivered).toEqual([1, 2]); // 业务只执行一次
-    expect(consumer.stats().duplicates).toBe(2);
-    // 游标被补 ack 回原位
-    expect(await store.cursor(topic, "dedup")).toMatchObject({ ackedSeq: 2 });
+
+    // 跨会话（新实例，lastDeliveredSeq 归零）+ 回拨后的游标 → 重投两次（at-least-once，
+    // 业务按 eventId/幂等键吸收——框架不承诺 exactly-once，ADR 0005 §6）
+    const c2 = new StreamConsumer({
+      store, topic, consumer: "dedup", pollIntervalMs: 0,
+      deliver: async (m) => delivered.push(m.seq),
+    });
+    expect(await c2.pollOnce()).toBe(2);
+    expect(delivered).toEqual([1, 2, 1, 2]);
   });
 
   it("consumer 间独立：故障消费者不影响同 topic 其他 consumer 的游标推进", async () => {
@@ -110,7 +118,8 @@ describe.runIf(!!PG_URL)("StreamConsumer 契约（真实 PostgreSQL）", () => {
     await expect(broken.pollOnce()).rejects.toThrow("always fail");
     expect(await ok.pollOnce()).toBe(3);
     expect(healthy).toEqual([1, 2, 3]);
-    expect(await store.cursor(topic, "broken")).toMatchObject({ ackedSeq: 0 });
+    // broken 从未成功 ack（游标不存在）；ok 独立推进到 3
+    expect(await store.cursor(topic, "broken")).toBeNull();
     expect(await store.cursor(topic, "ok")).toMatchObject({ ackedSeq: 3 });
     // broken 恢复后仍可独立追平（事件未被他人消费掉——流按 topic 保留）
     expect((await store.read(topic, 0, 10)).length).toBe(3);
