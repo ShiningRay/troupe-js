@@ -227,6 +227,7 @@ cron 语义：5 字段（分 时 日 月 周，本地时间），支持 `*`、�
 | [docs/operations.md](./docs/operations.md) | 集群/所有权/可观测/热替换/CLI |
 | [docs/ORLEANS_GAP.md](./docs/ORLEANS_GAP.md) / [ROADMAP](./docs/ROADMAP.md) | troupe.cr 经验、Orleans 10.0 差距研判、目标架构与执行计划 |
 | [docs/VERIFICATION.md](./docs/VERIFICATION.md) | 当前本机验证结果与跳过项 |
+| [docs/provider-guide.md](./docs/provider-guide.md) | 存储 Provider 作者指南（接口义务/能力声明/合同测试/不支持项） |
 
 **AI 工具 Skill**：[`.agents/skills/troupe/`](./.agents/skills/troupe/)（SKILL.md + references，跨工具标准位置）——供各类 AI 编码工具加载，包含 API 速查、必守规则（每条来自真实 bug）、陷阱清单与模式配方。复制该目录到任何支持 agent skills 的工具即可。
 
