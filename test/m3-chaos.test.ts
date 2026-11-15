@@ -231,6 +231,8 @@ describe("M3 混沌验收：事件循环暂停 → 接管 → 旧持有者写入
       // ④ B 恢复：旧 token 写入 → fencing 拒绝（无重复成功写）
       b.child.kill("SIGCONT");
       console.log("  [chaos3] SIGCONT B（旧持有者恢复，尝试以旧 token 写入）");
+      b.child.stdin!.write("try-write
+"); // 触发夹具以旧 epoch 直接 store.write
       const outcome = await new Promise<string>((resolve) => {
         const t = setInterval(() => {
           const fenced = b.lines.find((l) => l.startsWith("FENCED ") || l.startsWith("WROTE"));

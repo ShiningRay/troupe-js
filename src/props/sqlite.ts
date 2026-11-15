@@ -501,8 +501,8 @@ export class SqlitePropStore implements PropStore, OwnershipStore, DirectoryStor
   async listOwned(ownerIdPrefix: string): Promise<DirectoryRecord[]> {
     this.ensure();
     const rows = this.db!.prepare(
-      "SELECT namespace, role_id, stage_name, owner_id, epoch, lease_until, version, status FROM ownership WHERE owner_id LIKE ? || '#%'",
-    ).all(`${ownerIdPrefix}`) as Array<{
+      "SELECT namespace, role_id, stage_name, owner_id, epoch, lease_until, version, status FROM ownership WHERE owner_id = ? OR owner_id LIKE ? || '#%'",
+    ).all(ownerIdPrefix, ownerIdPrefix) as Array<{
       namespace: string;
       role_id: string;
       stage_name: string;

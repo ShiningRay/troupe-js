@@ -129,10 +129,9 @@ if (PG_URL) {
     const ns = `dir_${suffix}`;
     const addr = `test:${suffix}`;
     const isolated: DirectoryStore = {
-      // owner_id = addr#incarnation 形态（与 Cluster.stageId 一致），供 listOwned 前缀扫描
-      claim: (_n, r, s, o, l) => store.claim(ns, r, s, `${addr}${o}#1`, l),
+      claim: (_n, r, s, o, l) => store.claim(ns, r, s, `${addr}${o}`, l),
       lookup: (_n, r, s) => store.lookup(ns, r, s),
-      release: (_n, r, s, o, e) => store.release(ns, r, s, `${addr}${o}#1`, e),
+      release: (_n, r, s, o, e) => store.release(ns, r, s, `${addr}${o}`, e),
       bumpVersion: (_n, r, s) => store.bumpVersion(ns, r, s),
       listOwned: (p) => store.listOwned(`${addr}${p}`),
     };

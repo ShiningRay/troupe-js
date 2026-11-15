@@ -499,10 +499,11 @@ export class PostgresPropStore implements PropStore, OwnershipStore, DirectorySt
   async listOwned(ownerIdPrefix: string): Promise<DirectoryRecord[]> {
     const c = await this.client();
     try {
-      // owner_id = addr#incarnation：按 addr 前缀匹配（重启即新 incarnation，恢复扫描用）
+      // owner_id = addr#incarnation：按 addr 前缀匹配（恢复扫描用）；精确名（无 # 后缀）也命中，
+      // 便于契约测试与无 incarnation 身份的查询
       const r = await c.query(
         `SELECT namespace, role_id, stage_name, owner_id, epoch, lease_until, version, status
-         FROM ${this.q("ownership")} WHERE owner_id LIKE $1 || '#%'`,
+         FROM ${this.q("ownership")} WHERE owner_id = $1 OR owner_id LIKE $1 || '#%'`,
         [ownerIdPrefix],
       );
       return (r.rows as Array<Record<string, string>>).map((row) => ({
