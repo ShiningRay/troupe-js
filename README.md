@@ -2,7 +2,7 @@
 
 面向 Node.js/TypeScript 的 **Virtual Actor** 框架。设计见 [DESIGN.md](./DESIGN.md)，开发计划见 [PLAN.md](./PLAN.md)。
 
-> 状态：**M1–M11 已交付**；Orleans 对齐执行计划进行中——**P0（可信基线）与 P1（生产 HA）已完成**：fencing 全路径反例闭合（[ADR 0002](./docs/adr/0002-ownership-fencing.md)）、目录化路由（[ADR 0004](./docs/adr/0004-directory-ownership.md)：环降级候选、缓存→回源→claim）、同地址重启恢复、PG CueStore（SKIP LOCKED + CAS）+ cron 时区、production 强制 TLS + join 凭证限速 + adminToken、3 节点混沌入 CI/nightly。下一阶段 P2（可靠消息：Stream/Outbox/协作取消）见 [ROADMAP](./docs/ROADMAP.md)。
+> 状态：**M1–M11 已交付**；Orleans 对齐执行计划进行中——**P0（可信基线）与 P1（生产 HA）已完成**：fencing 全路径反例闭合（[ADR 0002](./docs/adr/0002-ownership-fencing.md)）、目录化路由（[ADR 0004](./docs/adr/0004-directory-ownership.md)：环降级候选、缓存→回源→claim）、同地址重启恢复、PG CueStore（SKIP LOCKED + CAS）+ cron 时区、production 强制 TLS + join 凭证限速 + adminToken、3 节点混沌入 CI/nightly。**P2（可靠消息）已完成**：PG StreamStore（原子 seq/幂等/ack 只前进/retention）+ StreamConsumer（at-least-once + 幂等去重）、事务性 Outbox/Inbox（SKIP LOCKED 派发 + 宕机重派 + dead-letter）、协作取消（ctx.signal + wire cancel）、Provider 合同测试（[ADR 0005](./docs/adr/0005-stream-outbox.md)、[Provider 指南](./docs/provider-guide.md)）。下一阶段 P3（协议 golden fixtures / 混合版本滚动升级 / 热替换 R1–R6）见 [ROADMAP](./docs/ROADMAP.md)。
 > 能力声明以 [CI](https://github.com/ShiningRay/troupejs/actions) 与 [VERIFICATION](./docs/VERIFICATION.md) 为准，不以本文表述为准。要求 Node >= 22.13；production 集群要求跨节点安全 Provider（PostgresPropStore）。
 
 ## 快速开始（仓库内）

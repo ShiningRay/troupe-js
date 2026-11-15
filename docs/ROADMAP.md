@@ -191,7 +191,16 @@ interface StoreCapabilities {
 
 **P1 退出标准**：生产模式默认安全（TLS+token+PG）；3 节点 kill -9/PG 重启/分区可恢复；目录是路由权威；PG Cue 跨节点；CI nightly 跑混沌。
 
-## 4. P2：可靠消息与状态边界（第 11–16 周）
+## 4. P2：可靠消息与状态边界（第 11–16 周）——✅ 已完成（2026-11-16）
+
+> P2-1..P2-6 全部交付：Stream/Outbox ADR（0005，Show=ephemeral / Stream=durable 不共享语义）；
+> PG StreamStore（原子 seq/幂等 eventId/ack 只前进/retain + RetentionExceeded）与 StreamConsumer
+> （失败不 ack 重投、会话内去重、consumer 独立游标）；事务性 Outbox/Inbox（Props 同事务提交、
+> SKIP LOCKED 派发 + 宕机重派、退避/dead-letter）；协作取消（ctx.signal + wire cancel，
+> CPU 阻塞不抢占文档明确）；Provider 合同测试（三 Provider capability 感知）+ provider-guide.md。
+> 证据：run 1f89e89 六 job 全绿（pg-required 235 passed + 8 项守卫/能力感知跳过）。
+> 已知边界：consumer 未接入 Troupe.form 自动装配（StreamConsumer 手动驱动）；Show/Stream
+> 边界测试以语义隔离文档替代专项用例。
 
 ### P2-1 Stream ADR 与 API（2 pd）
 

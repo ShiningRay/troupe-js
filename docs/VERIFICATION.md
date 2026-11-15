@@ -47,10 +47,23 @@
 2. `ownership-fencing.test.ts` PG 反例 3 项（F1-PG/F3-PG/F4-PG）+ 门禁守卫 1 项——同上；
 3. `m3-chaos.test.ts` SIGSTOP/SIGCONT 1 项——Windows 无该信号（pg-required leg 必跑）。
 
+## P2 完成摘要（2026-11-16）
+
+- **Stream**（P2-2/P2-3）：`PostgresStreamStore`（三表、原子 seq、幂等 eventId、ack 只前进、
+  retain + `RetentionExceededError`）+ `StreamConsumer`（失败不 ack 重投、会话内去重、
+  consumer 独立游标）——契约在 CI pg-required 真实 PG 必跑。
+- **Outbox/Inbox**（P2-4）：`publishWithProps` 与 Props 同事务（提交后 outbox 必存在，
+  失败整体回滚）；dispatcher SKIP LOCKED + lease 宕机重派；退避/dead-letter；Inbox 幂等。
+- **协作取消**（P2-5）：`ctx.signal`（per-Turn AbortSignal）+ wire cancel；排队期拒绝、
+  执行期自主返回、远程到达；CPU 阻塞不抢占（operations.md）。
+- **Provider 合同**（P2-6）：Memory/SQLite/PG capability 感知共享契约 +
+  [provider-guide.md](./provider-guide.md)（接口义务/能力声明/不支持项）。
+
 ## 已知边界（不是"已验证"）
 
 - 网络分区注入以 SIGSTOP 近似（toxiproxy/tc netem 未接入 nightly；P1-7 余项）。
-- Show 为实时尽力投递 + 3 次退避重试，**非 durable**；持久流未实现（P2）。
+- Show 为实时尽力投递 + 3 次退避重试，**非 durable**；Stream（durable）已实现但未接入
+  Troupe.form 自动装配（StreamConsumer 手动驱动，P2-3 手册式用法）。
 - cron 未显式 timeZone 时保持服务器本地时间（ROADMAP 曾建议默认 UTC——兼容性取舍，显式
   timeZone + validateTimeZone 已实现，见 P1-5）。
 - 密钥/证书轮换为文档约定（双钥宽限未自动化，P1-6 部署步骤见 README ops 节）。
