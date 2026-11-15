@@ -363,7 +363,9 @@ export class PostgresPropStore implements PropStore, OwnershipStore, DirectorySt
                             ELSE ${this.q("ownership")}.lease_until END,
            status = CASE WHEN ${expiredOrSelfOrRestarted}
                          THEN 'active' ELSE ${this.q("ownership")}.status END,
-           version = ${this.q("ownership")}.version + 1
+           version = CASE WHEN ${expiredOrSelfOrRestarted}
+                        THEN ${this.q("ownership")}.version + 1
+                        ELSE ${this.q("ownership")}.version END
          RETURNING owner_id, epoch, lease_until, version, status`,
         [namespace, roleId, stageName, ownerId, leaseMs],
       );
