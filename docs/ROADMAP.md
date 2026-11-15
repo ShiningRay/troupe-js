@@ -254,7 +254,14 @@ interface StoreCapabilities {
 
 **P2 退出标准**：Stream/Outbox 的崩溃恢复有实证；Show 与 Stream 边界清晰；取消可用；Provider 合同可执行。
 
-## 5. P3：互操作与升级（第 17–21 周）
+## 5. P3：互操作与升级（第 17–21 周）——✅ 已完成（2026-11-16）
+
+> P3-1..P3-5 全部交付：ADR 0003（线协议 v2 锚定 + R5 升级规则）与 golden fixtures
+> （xxh32/环归属/信封/WireErr，漂移即红，troupe.cr 跨仓对齐）；compatViolations 补 R2
+> （rpcParamCounts）并输出 R4/R5/R6 可解释状态——R1–R6 检查矩阵补全（R4 为显式人工门禁）；
+> 混合版本：protocolVersion 不一致 join 显式拒绝测试；文档/基准/发布矩阵入 VERIFICATION
+> （Node 22/24 × ubuntu/windows × PG16）。证据：run 43765404220 起全绿。
+> 已知边界：语义级兼容（R2/R4 深层语义）仍需发布说明人工评审（静态检查必要非充分）。
 
 ### P3-1 协议 ADR（3 pd）
 

@@ -67,7 +67,7 @@
 - cron 未显式 timeZone 时保持服务器本地时间（ROADMAP 曾建议默认 UTC——兼容性取舍，显式
   timeZone + validateTimeZone 已实现，见 P1-5）。
 - 密钥/证书轮换为文档约定（双钥宽限未自动化，P1-6 部署步骤见 README ops 节）。
-- P3（协议 golden fixtures、混合版本滚动升级、热替换 R1–R6 检查补全）未开始。
+- 语义级兼容（R2/R4 深层语义）静态检查为必要非充分条件——发布说明需人工语义评审（ADR 0003 §4）。
 
 相关跟踪：[Issues #1–#4](https://github.com/ShiningRay/troupejs/issues)。#2/#3 已由 P0-7
 关闭；#1/#4 分别对应 P2-1 / P3-4，未关闭。
