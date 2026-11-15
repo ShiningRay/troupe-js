@@ -22,6 +22,8 @@ export interface RoleMeta {
   codeVersion: number;
   /** RPC 白名单：原型链上的公开方法（生命周期/基类成员/下划线开头者除外） */
   rpcMethods: ReadonlySet<string>;
+  /** 方法名 → 必选参数个数（function.length；P3-4 R2 参数兼容检查依据） */
+  rpcParamCounts: ReadonlyMap<string, number>;
   /** 声明式持久提醒（@Cron/@Every）：方法名 → 计划 */
   persistentCues: ReadonlyMap<string, { everyMs?: number; cron?: string; timeZone?: string }>;
   /** 声明式内存 Cue（@Local）：方法名 → 周期 ms */
@@ -228,10 +230,22 @@ export function describeRole(
       initialProps: statics.initialProps?.bind(ctor) ?? (() => ({})),
       codeVersion: statics.codeVersion ?? 1,
       rpcMethods,
+      rpcParamCounts: buildParamCounts(ctor, rpcMethods),
       persistentCues,
       localCues,
       source,
     },
     warnings,
   };
+}
+
+/** 方法名 → 必选参数个数（P3-4 R2：新增参数必须带默认值 → function.length 不增） */
+function buildParamCounts(ctor: Function, methods: ReadonlySet<string>): ReadonlyMap<string, number> {
+  const out = new Map<string, number>();
+  const proto = ctor.prototype as Record<string, unknown>;
+  for (const m of methods) {
+    const fn = proto[m];
+    if (typeof fn === "function") out.set(m, fn.length);
+  }
+  return out;
 }

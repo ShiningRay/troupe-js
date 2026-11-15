@@ -600,7 +600,7 @@ export class Cluster {
 }
 
 /** 错误 → 线上分类（§6.1；stack 不上线，仅本地日志） */
-function encodeWireErr(e: unknown): WireErr {
+export function encodeWireErr(e: unknown): WireErr {
   if (e instanceof ConflictError) {
     return { kind: "conflict", name: "ConflictError", message: e.message };
   }
@@ -620,7 +620,7 @@ function encodeWireErr(e: unknown): WireErr {
   };
 }
 
-function decodeWireErr(err: WireErr): Error {
+export function decodeWireErr(err: WireErr): Error {
   switch (err.kind) {
     case "conflict":
       return new ConflictError(err.message, "revision");

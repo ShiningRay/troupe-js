@@ -57,6 +57,18 @@ export async function evaluateBundle(bundle: DeployBundle): Promise<Function> {
 export function compatViolations(oldMeta: RoleMeta, newCtor: Function, newMeta: RoleMeta): string[] {
   const out: string[] = [];
   const removed = [...oldMeta.rpcMethods].filter((m) => !newMeta.rpcMethods.has(m));
+  // R2（P3-4 补全）：必选参数个数不增（新增参数必须带默认值 → function.length 不变或减少）
+  for (const m of [...oldMeta.rpcMethods].filter((m) => newMeta.rpcMethods.has(m))) {
+    const before = oldMeta.rpcParamCounts.get(m);
+    const after = newMeta.rpcParamCounts.get(m);
+    if (before !== undefined && after !== undefined && after > before) {
+      out.push(`R2 违规：方法 ${m} 必选参数 ${before} → ${after}（新增参数必须有默认值，旧调用方省略时行为不变）`);
+    }
+  }
+  // R4/R5/R6 的可解释状态行（ROADMAP P3-4：自动检查或明确人工门禁）：
+  // - R4（Cue/Show payload 结构）：无静态检查——人工语义评审必填（发布说明）
+  // - R5（wire 向后兼容）：golden fixtures（test/golden/protocol-v2.json）+ join protocolVersion 校验承担
+  // - R6（幂等记录指纹结构）：golden fixtures 的 envelope/idem 形状锚定承担
   if (removed.length > 0) {
     out.push(`R1 违规：方法被移除/改名：${removed.join(", ")}`);
   }
