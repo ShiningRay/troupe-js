@@ -66,6 +66,12 @@ export interface TroupeOptions {
    */
   ownership?: { leaseMs?: number };
   /**
+   * production Provider 门禁的显式豁免（ADR 0002 I5，仅 dev/test 语义）：
+   * 允许 crossNodeSafe=false 的 Provider（如 SQLite）在 production 模式运行，
+   * 启动日志与事件流标记 degraded；不承诺跨节点无双活。
+   */
+  allowUnsafeProviders?: boolean;
+  /**
    * 持久提醒（M4，DESIGN §7.5）：启用 CueStore 与调度器（tick 默认 1s）。
    * Actor 内经 scheduleReminder/cancelReminder/onCue 使用。
    */
@@ -549,10 +555,40 @@ export class Troupe {
     // 所有权（§6.5）：显式开启或 production 模式强制；要求共享存储支持
     const productionMode =
       opts.cluster?.mode === "production" || process.env.TROUPE_MODE === "production";
+    const allowUnsafeProviders = opts.allowUnsafeProviders === true;
+
+    // production Provider 门禁（ADR 0002 I5 / ROADMAP P0-6）：
+    // 按 capabilities 判定，不再把"SQLite 同机多进程"当作 production 可接受的理由。
+    if (productionMode) {
+      const caps = propStore.capabilities;
+      const unsafeStore = !(caps.crossNodeSafe && caps.supportsFencing);
+      if (unsafeStore && !allowUnsafeProviders) {
+        throw new TroupeError(
+          `production 集群要求 PropStore 跨节点安全且支持 fencing：当前 Provider 声明 ` +
+            `crossNodeSafe=${caps.crossNodeSafe}, supportsFencing=${caps.supportsFencing}。` +
+            `SQLite 仅同机多进程安全，跨主机共享盘的锁语义不成立（ADR 0002 §8）；` +
+            `production 请使用 PostgresPropStore，或显式 allowUnsafeProviders: true 豁免（不承诺跨节点安全）`,
+        );
+      }
+      if (cueStore && !cueStore.capabilities.crossNodeSafe && !allowUnsafeProviders) {
+        throw new TroupeError(
+          `production + cues 要求 CueStore 跨节点安全：${cueStore.constructor.name} 声明 ` +
+            `crossNodeSafe=false（PG CueStore 见 ROADMAP P1-5）；显式 allowUnsafeProviders 可豁免但不承诺跨节点`,
+        );
+      }
+      if (unsafeStore) {
+        const message =
+          "[degraded] allowUnsafeProviders=true：production 运行在不跨节点安全的 Provider 上" +
+          "（fencing 的跨节点承诺不生效，ADR 0002 I5）";
+        events.emit({ type: "warn", roleId: "<troupe>", at: now(), detail: { message, degraded: true } });
+        console.warn(`[troupe] ${message}`);
+      }
+    }
+
     if (opts.ownership || productionMode) {
       if (!isOwnershipStore(propStore)) {
         throw new TroupeError(
-          "所有权要求 PropStore 实现 OwnershipStore（SqlitePropStore 同机多进程 / PostgresPropStore 节点级，DESIGN §6.5/§7.2）",
+          "所有权要求 PropStore 实现 OwnershipStore（production 要求 crossNodeSafe Provider；SQLite 仅同机多进程，PostgresPropStore 多机，DESIGN §6.5/§7.2 + ADR 0002 §8）",
         );
       }
       ownershipRef.current = {

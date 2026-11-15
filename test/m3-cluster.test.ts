@@ -197,7 +197,8 @@ describe("M3 验收：production 部署模式（§6.2/§8.2）", () => {
           seeds: [seed.clusterAddress()!],
         },
       }),
-    ).rejects.toThrow(/所有权/);
+      // P0-6 起门禁前移：crossNodeSafe=false 的 Provider 在 OwnershipStore 检查之前即被拒（ADR 0002 I5）
+    ).rejects.toThrow(/crossNodeSafe|所有权/);
     await seed.shutdown();
   });
 });
