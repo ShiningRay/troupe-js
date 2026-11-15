@@ -66,15 +66,16 @@ describe.runIf(!!PG_URL)("PostgresOutboxStore 契约（真实 PostgreSQL）", ()
     const topic = t("dispatch");
     for (let i = 1; i <= 3; i++) await outbox.append(topic, { i });
 
-    // 两 worker 竞争：无重复派发
+    // 两 worker 竞争（先抢到者不定——SKIP LOCKED 语义）：合并恰 3 条、无重复派发
     const [w1, w2] = await Promise.all([
       outbox.claimBatch("w1", 10, 80), // 短租约：模拟宕机不 markDone
       outbox.claimBatch("w2", 10, 60_000),
     ]);
-    expect(w1).toHaveLength(3);
-    expect(w2).toHaveLength(0); // SKIP LOCKED + 已租约：不重复派发
+    const combined = [...w1, ...w2];
+    expect(combined).toHaveLength(3);
+    expect(new Set(combined.map((m) => m.id)).size).toBe(3); // SKIP LOCKED + 租约：无重复派发
 
-    // 宕机重派：w1 未 markDone → 80ms 租约到期 → 可重新 claim
+    // 宕机重派：短租约（80ms）未 markDone → 到期 → 可重新 claim（无论原始归属哪个 worker）
     await sleep(100);
     const reclaimed = await outbox.claimBatch("w3", 10, 60_000);
     expect(reclaimed).toHaveLength(3);
