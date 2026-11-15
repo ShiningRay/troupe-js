@@ -18,6 +18,8 @@ export { type CueStore, type ReminderRecord, type ReminderSpec, type ReminderKey
 export { InMemoryCueStore } from "./cues/memory.js";
 export { SqliteCueStore } from "./cues/sqlite.js";
 export { PostgresCueStore } from "./cues/postgres.js";
+export { isStreamStore, type StreamStore, type StreamMessage, type StreamCursor, type StreamAppendResult } from "./streams/stream-store.js";
+export { PostgresStreamStore } from "./streams/postgres.js";
 export { CueScheduler } from "./cues/scheduler.js";
 export { codecCopy, defaultJsonCodec, type Codec } from "./core/codec.js";
 export { HashRing, xxh32 } from "./cluster/hash-ring.js";

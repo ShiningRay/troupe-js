@@ -75,6 +75,12 @@ export class SerializationError extends TroupeError {}
 /** 激活失败：加载、迁移或 onStage() 抛错（DESIGN §5.2 状态机） */
 export class ActivationError extends TroupeError {}
 
+/**
+ * 流保留裁剪后消费已裁剪段（ADR 0005 §2，P2-2）：
+ * 调用方必须显式重置消费位（数据已不可恢复——显式失败，不静默跳读）。
+ */
+export class RetentionExceededError extends TroupeError {}
+
 /** swap 守则静态检查违规（DESIGN §9.5）：不合规代码拒绝 swap */
 export class SwapViolationError extends TroupeError {
   constructor(
