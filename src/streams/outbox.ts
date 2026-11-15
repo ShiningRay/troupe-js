@@ -175,9 +175,11 @@ export class PostgresOutboxStore {
     try {
       await c.query("BEGIN");
       const now = `(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint`;
+      // 派发资格只由租约判定（ADR 0005 §4 宕机重派）：pending（lease=0）可派；
+      // leased 且租约到期（worker 不 markDone 即宕机）→ 重新可派。status 由 UPDATE 重置。
       const r = await c.query(
         `SELECT id, topic, event_id, payload, attempts FROM ${this.q("outbox")}
-         WHERE status = 'pending' AND next_attempt_at <= ${now} AND lease_until <= ${now}
+         WHERE next_attempt_at <= ${now} AND lease_until <= ${now}
          ORDER BY id
          LIMIT $1
          FOR UPDATE SKIP LOCKED`,
