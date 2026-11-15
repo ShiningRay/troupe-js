@@ -15,10 +15,14 @@ if (!existsSync(file)) {
 
 const data = JSON.parse(readFileSync(file, "utf8"));
 const skipped = [];
+const guardSkipped = [];
 for (const tr of data.testResults ?? []) {
   for (const a of tr.assertionResults ?? []) {
     if (a.status === "skipped" || a.status === "todo") {
-      skipped.push(`${tr.name ?? tr.file ?? "?"} :: ${a.fullName ?? a.title ?? "?"}`);
+      const entry = `${tr.name ?? tr.file ?? "?"} :: ${a.fullName ?? a.title ?? "?"}`;
+      // "PG 门禁"守卫本身不是 PG 用例：URL 已提供时它按设计跳过（见 ownership-fencing.test.ts）
+      if (/拒绝静默跳过/.test(a.fullName ?? a.title ?? "")) guardSkipped.push(entry);
+      else skipped.push(entry);
     }
   }
 }
@@ -27,6 +31,9 @@ const lines = [
   "## 跳过的用例（列明原因，非静默跳过）",
   skipped.length ? skipped.map((s) => `- ${s}`).join("\n") : "（无跳过项）",
 ];
+if (guardSkipped.length) {
+  lines.push("", `门禁守卫按设计跳过（非 PG 用例）：${guardSkipped.length} 项`);
+}
 const summary = lines.join("\n");
 console.log(summary);
 if (process.env.GITHUB_STEP_SUMMARY) {

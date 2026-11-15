@@ -102,7 +102,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: npm pack --pack-destination ./pack
+      - run: mkdir -p pack && npm pack --pack-destination ./pack
       - name: 最小安装（无 pg）：troupe 可导入，SQLite/内存 Provider 可用
         shell: bash
         run: |

@@ -28,6 +28,9 @@ class CallerActor extends Actor<Record<string, never>> {
 
 class AliceActor extends Actor<Record<string, never>> {
   static initialProps = () => ({}) as Record<string, never>;
+  // hello 是环状等待打破后的存活探针：不受 200ms 默认期限约束（CI 慢机下
+  // 上一个 Turn 的执行占用 settle 可能超过默认期限，属排队过期误伤）
+  static timeouts = { hello: "3s" };
 
   async ask() {
     return await this.cast(BobActor, "b1").echo();

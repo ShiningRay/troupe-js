@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -216,7 +216,9 @@ describe("M10 验收：keep（旧实例运行到自然下场）", () => {
 
 describe("M10 验收：createDevReloader（文件监听 + 版本化重导）", () => {
   it("修改 actor 文件保存 → 自动 reload（recycle，Props 无损）", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "troupe-dev-"));
+    // realpathSync expands 8.3 short paths (GH Windows runner TMP=C:/Users/RUNNER~1/...):
+    // vite URL-encodes the '~' in the short name and fails to load the module (seen in CI)
+    const dir = mkdtempSync(join(realpathSync(tmpdir()), "troupe-dev-"));
     const actorFile = join(dir, "counter.actor.ts");
     const baseUrl = pathToFileURL(join(process.cwd(), "src", "index.ts")).href;
     const v1 = `
