@@ -2,7 +2,7 @@
 
 > 基线：Orleans 源码 `8320d257`，版本声明 10.0.0（`Directory.Build.props:64-67`）。
 > 证据：本文基于 2026-11-14 至 11-16 对 `troupejs` 源码、测试与文档的审计，并对照 `troupe.cr` 的 M1–M6 实现与验收记录；代码行号对应 `troupejs` commit `8208823`。
-> 配套执行计划：[ROADMAP.md](./ROADMAP.md)。统一跨语言决策仍在 [troupe-planning](https://github.com/ShiningRay/troupe-planning) 协调。
+> 配套执行计划：[ROADMAP.md](./ROADMAP.md)。统一跨语言决策仍在 [troupe-planning](https://github.com/ShiningRay/troupe) 协调。
 
 ## 0. 一页结论
 
