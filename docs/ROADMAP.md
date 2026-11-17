@@ -26,7 +26,7 @@
 
 > P0-1..P0-8 全部交付并推送：ADR 0002、反例 F1–F6（先红后绿）、StoreCapabilities、
 > PG/SQLite 严格 fencing、续租失败停服、production 门禁、CI 六 job（含 pg-required 必跑 leg）、
-> 文档单一来源。证据：[VERIFICATION](./VERIFICATION.md)、run [43746483768](https://github.com/ShiningRay/troupejs/actions/runs/43746483768) 全绿。
+> 文档单一来源。证据：[VERIFICATION](./VERIFICATION.md)、run [43746483768](https://github.com/ShiningRay/troupe-js/actions/runs/43746483768) 全绿。
 > issue 映射更新：#2/#3 已随 P0-7 关闭。
 
 ### P0-1 写所有权/fencing ADR（2 pd）

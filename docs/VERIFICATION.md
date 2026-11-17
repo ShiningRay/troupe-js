@@ -5,7 +5,7 @@
 
 ## CI（权威证据）
 
-- 工作流：[.github/workflows/ci.yml](../.github/workflows/ci.yml)，推送/PR 触发，历史见 [Actions](https://github.com/ShiningRay/troupejs/actions)。
+- 工作流：[.github/workflows/ci.yml](../.github/workflows/ci.yml)，推送/PR 触发，历史见 [Actions](https://github.com/ShiningRay/troupe-js/actions)。
 - 矩阵：ubuntu-latest / windows-latest × Node 22 / 24（typecheck + build + vitest 全量）。
 - **pg-required leg**（Linux + Node 22 + PostgreSQL 16 service）：`TROUPE_REQUIRE_PG=1`，
   任何用例跳过即 job 失败；SIGSTOP/SIGCONT 混沌用例在此 leg 必跑。
@@ -15,8 +15,8 @@
 
 ## 最近一次 CI 结果
 
-**Run [43746483768](https://github.com/ShiningRay/troupejs/actions/runs/43746483768)（P0-8 文档提交前）：6/6 job 全绿**。
-后续以 [Actions 首页](https://github.com/ShiningRay/troupejs/actions)最新 run 为准——本文不复制会过期的数字。P0 完成时的构成：
+**Run [43746483768](https://github.com/ShiningRay/troupe-js/actions/runs/43746483768)（P0-8 文档提交前）：6/6 job 全绿**。
+后续以 [Actions 首页](https://github.com/ShiningRay/troupe-js/actions)最新 run 为准——本文不复制会过期的数字。P0 完成时的构成：
 
 - 所有权/fencing 反例 F1–F6（`test/ownership-fencing.test.ts`）全绿；
   PG 变体（F1-PG/F3-PG/F4-PG）在 pg-required leg 于真实 PostgreSQL 上执行。
@@ -69,5 +69,5 @@
 - 密钥/证书轮换为文档约定（双钥宽限未自动化，P1-6 部署步骤见 README ops 节）。
 - 语义级兼容（R2/R4 深层语义）静态检查为必要非充分条件——发布说明需人工语义评审（ADR 0003 §4）。
 
-相关跟踪：[Issues #1–#4](https://github.com/ShiningRay/troupejs/issues)。#2/#3 已由 P0-7
+相关跟踪：[Issues #1–#4](https://github.com/ShiningRay/troupe-js/issues)。#2/#3 已由 P0-7
 关闭；#1/#4 分别对应 P2-1 / P3-4，未关闭。
